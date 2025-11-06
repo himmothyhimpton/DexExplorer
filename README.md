@@ -1,6 +1,6 @@
 # Internet Access Miracle
 
-[![Android Build](https://github.com/applesaucetoaboss/app/actions/workflows/android-build.yml/badge.svg?branch=main)](https://github.com/applesaucetoaboss/app/actions/workflows/android-build.yml)
+[![Android Build](https://github.com/himmothyhimpton/flux-capacitor/actions/workflows/android-build.yml/badge.svg?branch=main)](https://github.com/himmothyhimpton/flux-capacitor/actions/workflows/android-build.yml)
 
 An application that helps users without internet access to establish connections through various methods.
 
@@ -21,7 +21,7 @@ This project can be built into an Android app using GitHub Actions:
 
 For detailed local setup instructions, see [Android Setup](android-setup.md).
 
-View CI runs: https://github.com/applesaucetoaboss/app/actions
+View CI runs: https://github.com/himmothyhimpton/flux-capacitor/actions
 
 ## Privacy Policy (for Google Play)
 
@@ -31,13 +31,13 @@ You need a public URL for your Privacy Policy. Two easy options:
 - GitHub Pages: use the included `docs/privacy.html`.
 
 ### Enable GitHub Pages
-1. Push the repo to GitHub (e.g., `https://github.com/applesaucetoaboss/app`).
+1. Push the repo to GitHub (e.g., `https://github.com/himmothyhimpton/flux-capacitor`).
 2. In GitHub: Settings → Pages → Source: "Deploy from a branch".
 3. Select Branch: `main`, Folder: `/docs`, then Save.
 4. Your policy will be available at `https://<your-username>.github.io/<repo-name>/privacy.html`.
 
 For the provided repo, the link will be:
-- `https://applesaucetoaboss.github.io/app/privacy.html`
+- `https://himmothyhimpton.github.io/flux-capacitor/privacy.html`
 
 Add this URL in Play Console → App content → Privacy policy.
 

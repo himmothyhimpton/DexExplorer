@@ -57,8 +57,8 @@ jobs:
       - name: Set up Capacitor
         run: |
           cd frontend
-          npm install @capacitor/core @capacitor/cli @capacitor/android
-          if [ ! -f capacitor.config.json ]; then npx cap init "Boost Capacitor" "com.boostcapacitor.app" --web-dir=build; fi
+          npm install @capacitor/core@^6 @capacitor/cli@^6 @capacitor/android@^6
+          if [ ! -f capacitor.config.json ]; then npx cap init "Flux Capacitor" "com.fluxcapacitor.app" --web-dir=build; fi
           npx cap add android
 
       - name: Install AdMob plugin and sync

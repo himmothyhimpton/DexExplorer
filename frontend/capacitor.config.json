@@ -1,6 +1,6 @@
 {
-  "appId": "com.boostcapacitor.app",
-  "appName": "Boost Capacitor",
+  "appId": "com.fluxcapacitor.app",
+  "appName": "Flux Capacitor",
   "webDir": "build",
   "bundledWebRuntime": false,
   "server": {
