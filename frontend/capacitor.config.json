@@ -1,0 +1,14 @@
+{
+  "appId": "com.boostcapacitor.app",
+  "appName": "Boost Capacitor",
+  "webDir": "build",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}
