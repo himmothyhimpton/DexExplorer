@@ -1,15 +1,15 @@
-# Internet Access Miracle
+# Flux Capacitor
 
 [![Android Build](https://github.com/himmothyhimpton/flux-capacitor/actions/workflows/android-build.yml/badge.svg?branch=main)](https://github.com/himmothyhimpton/flux-capacitor/actions/workflows/android-build.yml)
 
-An application that helps users without internet access to establish connections through various methods.
+A React + FastAPI application for connectivity diagnostics and routing enhancements to reinforce connectivity.
 
 ## Overview
 
 This application consists of:
 - **Backend**: FastAPI server that discovers and manages internet connection sources
 - **Frontend**: React application that provides a user interface
-- **Android App**: Mobile version for users without internet access
+- **Android App**: Mobile version providing diagnostics and connection attempts via available routes
 
 ## Android Build
 
@@ -74,6 +74,11 @@ cd frontend
 npm install
 npm start
 ```
+
+### Dark Web Mode (Ahmia Auto‑Redirect)
+- Clicking the `Dark Web` option now immediately opens the secure browser overlay and auto‑connects using Tor requirements, then loads Ahmia (`https://ahmia.fi/`) without intermediate prompts.
+- A loading indicator is shown during connection; existing rewards gate and connection safeguards remain in place.
+- Normal mode continues to use DuckDuckGo by default and supports an Incognito toggle for persistence control.
 
 ## GitHub Workflow
 

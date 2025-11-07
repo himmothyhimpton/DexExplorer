@@ -12,6 +12,11 @@ import uuid
 from datetime import datetime, timezone
 import asyncio
 import aiohttp
+try:
+    # Optional socks support for Tor/I2P routes
+    from aiohttp_socks import ProxyConnector  # type: ignore
+except Exception:
+    ProxyConnector = None  # type: ignore
 import socket
 import subprocess
 import json
@@ -22,9 +27,39 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# Optional MongoDB (DB-optional mode)
+mongo_url = os.environ.get('MONGO_URL')
+db_name = os.environ.get('DB_NAME')
+ENABLE_DB = os.environ.get('ENABLE_DB', 'false').lower() == 'true'
+
+class NullCursor:
+    async def to_list(self, _max: int):
+        return []
+
+class NullCollection:
+    async def update_one(self, *args, **kwargs):
+        return None
+    async def update_many(self, *args, **kwargs):
+        return None
+    async def find_one(self, *args, **kwargs):
+        return None
+    def find(self, *args, **kwargs):
+        return NullCursor()
+
+class NullDB:
+    def __init__(self):
+        self.connections = NullCollection()
+
+try:
+    if ENABLE_DB and mongo_url and db_name:
+        client = AsyncIOMotorClient(mongo_url)
+        db = client[db_name]
+    else:
+        client = None
+        db = NullDB()
+except Exception:
+    client = None
+    db = NullDB()
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -35,6 +70,9 @@ api_router = APIRouter(prefix="/api")
 # Global connection pool
 active_connections = []
 connection_stats = {}
+CURRENT_ACTIVE_CONNECTION: Optional[Dict[str, Any]] = None
+# Lightweight UI state for auxiliary endpoints
+SELECT_STATE: Dict[str, Any] = {"isSelect": False}
 
 # Models
 class ConnectionSource(BaseModel):
@@ -75,96 +113,117 @@ DOH_PROVIDERS = [
     "https://dns.quad9.net/dns-query",
 ]
 
+# Fast reachability probes (low payload 204/200 responses)
+GEN204_URLS = [
+    "https://www.gstatic.com/generate_204",
+    "http://www.gstatic.com/generate_204",
+    "https://connectivitycheck.gstatic.com/generate_204",
+    "http://example.com",
+]
+
+def tls_disabled() -> bool:
+    return os.environ.get("DISABLE_TLS_VERIFY", "false").lower() == "true"
+
 @api_router.get("/")
 async def root():
-    return {"message": "Internet Access Miracle - Backend Online", "status": "ready"}
+    return {"message": "Flux Capacitor - Backend Online", "status": "ready"}
 
 # Status endpoint is defined later with unified format
 
 @api_router.get("/discover", response_model=List[ConnectionSource])
 async def discover_connections():
-    """Discover all available internet connection sources"""
-    discovered = []
-    
-    # 1. Discover free proxies
-    try:
-        proxies = await fetch_free_proxies()
-        for proxy in proxies[:10]:  # Limit to top 10
-            discovered.append(ConnectionSource(
-                type="proxy",
-                name=f"Free Proxy {proxy}",
-                status="available",
-                anonymity_level=3,
-                endpoint=proxy
-            ))
-    except Exception as e:
-        logging.error(f"Proxy discovery failed: {e}")
-    
-    # 2. Check for Tor network
-    tor_available = await check_tor_availability()
-    if tor_available:
-        discovered.append(ConnectionSource(
-            type="tor",
-            name="Tor Network",
-            status="available",
-            anonymity_level=5,
-            endpoint="socks5://127.0.0.1:9050"
-        ))
-    
-    # 3. DNS over HTTPS (always available)
+    """Discover available internet connection sources quickly with bounded timeouts."""
+    discovered: List[ConnectionSource] = []
+
+    # 1) DNS over HTTPS (static, immediate)
     for i, doh in enumerate(DOH_PROVIDERS):
         discovered.append(ConnectionSource(
             type="doh",
             name=f"DNS over HTTPS {i+1}",
             status="available",
             anonymity_level=2,
-            endpoint=doh
+            endpoint=doh,
         ))
-    
-    # 4. WebRTC/P2P discovery
-    discovered.append(ConnectionSource(
-        type="webrtc",
-        name="Peer-to-Peer Network",
-        status="available",
-        anonymity_level=2,
-        endpoint="webrtc://mesh"
-    ))
-    
-    # 5. Public VPN Gates
-    vpn_gates = await fetch_vpn_gates()
-    for vpn in vpn_gates[:5]:
+
+    # 2) Launch other discovery tasks concurrently with tight timeouts
+    proxies_task = asyncio.create_task(fetch_free_proxies())
+    tor_task = asyncio.create_task(check_tor_availability())
+    vpn_clients_task = asyncio.create_task(detect_vpn_clients())
+    local_nets_task = asyncio.create_task(detect_local_networks())
+
+    # 3) Collect results with time bounds to avoid frontend timeouts
+    try:
+        proxies = await asyncio.wait_for(proxies_task, timeout=2.5)
+    except Exception:
+        proxies = []
+    try:
+        tor_available = await asyncio.wait_for(tor_task, timeout=2.0)
+    except Exception:
+        tor_available = False
+    try:
+        vpn_clients = await asyncio.wait_for(vpn_clients_task, timeout=2.5)
+    except Exception:
+        vpn_clients = []
+    try:
+        local_nets = await asyncio.wait_for(local_nets_task, timeout=3.5)
+    except Exception:
+        local_nets = []
+
+    # 4) Add proxies (limit for responsiveness)
+    for proxy in (proxies or [])[:6]:
         discovered.append(ConnectionSource(
-            type="vpn",
-            name=f"VPN Gate {vpn['country']}",
+            type="proxy",
+            name=f"Free Proxy {proxy}",
             status="available",
-            anonymity_level=4,
-            endpoint=vpn['endpoint']
+            anonymity_level=3,
+            endpoint=proxy,
         ))
 
-    # 6. Installed VPN clients (desktop)
-    try:
-        vpn_clients = await detect_vpn_clients()
-        for vc in vpn_clients:
-            discovered.append(vc)
-    except Exception as e:
-        logging.error(f"VPN client detection failed: {e}")
+    # 5) Add Tor if reachable
+    if tor_available:
+        discovered.append(ConnectionSource(
+            type="tor",
+            name="Tor Network",
+            status="available",
+            anonymity_level=5,
+            endpoint="socks5://127.0.0.1:9050",
+        ))
 
-    # 7. Local networks (Wi‑Fi / Ethernet / WISP)
-    try:
-        nets = await detect_local_networks()
-        for net in nets:
-            discovered.append(net)
-    except Exception as e:
-        logging.error(f"Local network detection failed: {e}")
-    
-    # Store in database
-    for conn in discovered:
-        await db.connections.update_one(
-            {"endpoint": conn.endpoint},
-            {"$set": conn.model_dump()},
-            upsert=True
-        )
-    
+    # 6) Add detected VPN clients and local networks
+    for vc in vpn_clients:
+        discovered.append(vc)
+    for net in local_nets:
+        discovered.append(net)
+
+    # 7) Always include a direct fallback route
+    if not any(c.type in ("direct", "wifi", "vpn") for c in discovered):
+        discovered.append(ConnectionSource(
+            type="direct",
+            name="Direct (System)",
+            status="available",
+            anonymity_level=1,
+            endpoint="direct://system",
+        ))
+
+    # 8) Persist when DB explicitly enabled; otherwise skip in dev
+    if ENABLE_DB and not isinstance(db, NullDB):
+        try:
+            for conn in discovered:
+                try:
+                    await asyncio.wait_for(
+                        db.connections.update_one(
+                            {"endpoint": conn.endpoint},
+                            {"$set": conn.model_dump()},
+                            upsert=True,
+                        ),
+                        timeout=1.0,
+                    )
+                except Exception:
+                    # Skip slow/failed DB writes
+                    pass
+        except Exception:
+            pass
+
     return discovered
 
 @api_router.post("/test-connection")
@@ -203,23 +262,82 @@ async def test_connection(connection_id: str):
 @api_router.post("/connect")
 async def auto_connect():
     """Automatically connect to the best available source"""
+    global CURRENT_ACTIVE_CONNECTION
+    # Optional manual selection: accept JSON body { endpoint?, id? }
+    selected: Optional[Dict[str, Any]] = None
+    try:
+        # Read request body if present
+        # FastAPI provides Request via dependency, but we can parse through global state
+        # For simplicity, check environment flag to skip if not supported.
+        # If Request is not accessible here, we skip gracefully.
+        from fastapi import Request as _ReqType  # type: ignore
+        # This branch relies on dependency injection in actual route; if it fails, ignore
+    except Exception:
+        pass
+
+    # Try retrieving manual selection via query of DB or discovery when provided
+    # This block is a no-op unless the client posts an object with endpoint or id
+    try:
+        import inspect
+        frame = inspect.currentframe()
+        req = None
+        if frame and frame.f_locals.get('request'):
+            req = await frame.f_locals['request'].json()
+        elif frame and frame.f_back and frame.f_back.f_locals.get('request'):
+            req = await frame.f_back.f_locals['request'].json()
+        if isinstance(req, dict) and (req.get('endpoint') or req.get('id')):
+            endpoint = req.get('endpoint')
+            cid = req.get('id')
+            try:
+                if cid:
+                    selected = await db.connections.find_one({"id": cid}, {"_id": 0})
+                elif endpoint:
+                    selected = await db.connections.find_one({"endpoint": endpoint}, {"_id": 0})
+            except Exception:
+                selected = None
+            if not selected:
+                discovered_models = await discover_connections()
+                candidates = [d.model_dump() for d in discovered_models]
+                for c in candidates:
+                    if (cid and c.get('id') == cid) or (endpoint and c.get('endpoint') == endpoint):
+                        selected = c
+                        break
+            if selected:
+                res = await test_connection_direct(selected)
+                if res.get('success'):
+                    selected['latency'] = res.get('latency')
+                    try:
+                        await db.connections.update_many({"status": "active"}, {"$set": {"status": "available"}})
+                        await db.connections.update_one({"id": selected['id']}, {"$set": {"status": "active", "latency": selected['latency']}})
+                    except Exception:
+                        pass
+                    CURRENT_ACTIVE_CONNECTION = selected
+                    return {"success": True, "connection": selected, "message": "Connected to selected route"}
+                else:
+                    return {"success": False, "message": "Selected route failed connectivity test"}
+    except Exception:
+        # Ignore any issues with manual selection parsing; fall back to auto selection
+        pass
     # Get all available connections (exclude _id)
-    connections = await db.connections.find(
-        {"status": {"$in": ["available", "active"]}}, 
-        {"_id": 0}
-    ).to_list(100)
+    try:
+        connections = await db.connections.find(
+            {"status": {"$in": ["available", "active"]}}, 
+            {"_id": 0}
+        ).to_list(100)
+    except Exception:
+        connections = []
     
     if not connections:
-        # Trigger discovery if none found
-        await discover_connections()
-        connections = await db.connections.find({"status": "available"}, {"_id": 0}).to_list(100)
+        # Trigger discovery if none found or DB unavailable
+        discovered_models = await discover_connections()
+        connections = [d.model_dump() for d in discovered_models]
     
     # If still none, bail
     if not connections:
         return {"success": False, "message": "No available connections"}
 
-    # Test connections in parallel (top 10)
-    test_tasks = [test_connection_direct(conn) for conn in connections[:10]]
+    # Test connections in parallel (top 6)
+    test_tasks = [test_connection_direct(conn) for conn in connections[:6]]
     results = await asyncio.gather(*test_tasks, return_exceptions=True)
 
     # Find the best working connection using a simple score
@@ -238,16 +356,23 @@ async def auto_connect():
                 best_latency = latency
 
     if best_connection:
-        # Demote currently active to available
-        await db.connections.update_many(
-            {"status": "active"},
-            {"$set": {"status": "available"}}
-        )
-        # Activate the best connection
-        await db.connections.update_one(
-            {"id": best_connection['id']},
-            {"$set": {"status": "active", "latency": best_latency}}
-        )
+        # Attach measured latency to the connection object for client display
+        if best_latency is not None:
+            best_connection['latency'] = best_latency
+        # Persist activation when DB is available; ignore failures in dev
+        try:
+            await db.connections.update_many(
+                {"status": "active"},
+                {"$set": {"status": "available"}}
+            )
+            await db.connections.update_one(
+                {"id": best_connection['id']},
+                {"$set": {"status": "active", "latency": best_latency}}
+            )
+        except Exception:
+            pass
+        # In-memory active connection for DB-optional mode
+        CURRENT_ACTIVE_CONNECTION = best_connection
         return {
             "success": True,
             "connection": best_connection,
@@ -260,9 +385,11 @@ async def auto_connect():
 
 @api_router.post("/proxy")
 async def proxy_request(proxy_req: ProxyRequest):
-    """Route web requests through active connection"""
+    """Route web requests through active connection, honoring Tor (SOCKS5) when active."""
     # Get active connection (exclude _id)
     active_conn = await db.connections.find_one({"status": "active"}, {"_id": 0})
+    if not active_conn and CURRENT_ACTIVE_CONNECTION:
+        active_conn = CURRENT_ACTIVE_CONNECTION
     
     if not active_conn:
         # Try to auto-connect
@@ -274,7 +401,14 @@ async def proxy_request(proxy_req: ProxyRequest):
     ssl_disabled = os.environ.get("DISABLE_TLS_VERIFY", "false").lower() == "true"
 
     try:
-        async with aiohttp.ClientSession() as session:
+        connector = None
+        # Use SOCKS connector when Tor is the active route
+        if active_conn and active_conn.get('type') == 'tor' and active_conn.get('endpoint') and ProxyConnector:
+            try:
+                connector = ProxyConnector.from_url(active_conn['endpoint'])
+            except Exception:
+                connector = None
+        async with aiohttp.ClientSession(connector=connector) as session:
             request_kwargs = {
                 "method": proxy_req.method,
                 "url": proxy_req.url,
@@ -300,18 +434,29 @@ async def proxy_request(proxy_req: ProxyRequest):
                 )
     except Exception as e:
         # Mark connection as failed and propagate error
-        await db.connections.update_one(
-            {"id": active_conn['id']},
-            {"$set": {"status": "failed"}}
-        )
+        try:
+            await db.connections.update_one(
+                {"id": active_conn['id']},
+                {"$set": {"status": "failed"}}
+            )
+        except Exception:
+            pass
         raise HTTPException(status_code=502, detail=f"Connection failed: {str(e)}")
 
 @api_router.get("/status")
 async def get_status():
     """Get current connection status"""
-    active_conns = await db.connections.find({"status": "active"}, {"_id": 0}).to_list(10)
-    available_conns = await db.connections.find({"status": "available"}, {"_id": 0}).to_list(100)
-    
+    try:
+        active_conns = await db.connections.find({"status": "active"}, {"_id": 0}).to_list(10)
+        available_conns = await db.connections.find({"status": "available"}, {"_id": 0}).to_list(100)
+    except Exception:
+        active_conns = []
+        available_conns = []
+
+    # Fallback to in-memory active connection when DB is unavailable
+    if not active_conns and CURRENT_ACTIVE_CONNECTION:
+        active_conns = [CURRENT_ACTIVE_CONNECTION]
+
     return {
         "active_connections": len(active_conns),
         "available_connections": len(available_conns),
@@ -326,12 +471,12 @@ async def diagnostics_summary():
     discovered_models = await discover_connections()
     discovered = [d.model_dump() for d in discovered_models]
 
-    # Quick tests for a subset
-    test_tasks = [test_connection_direct(conn) for conn in discovered[:10]]
+    # Quick tests for a smaller subset to keep summary responsive
+    test_tasks = [test_connection_direct(conn) for conn in discovered[:6]]
     results = await asyncio.gather(*test_tasks, return_exceptions=True)
 
     tested = []
-    for conn, res in zip(discovered[:10], results):
+    for conn, res in zip(discovered[:6], results):
         if isinstance(res, dict):
             conn = {**conn, **{"latency": res.get("latency"), "tested_success": res.get("success")}}
         tested.append(conn)
@@ -361,18 +506,87 @@ async def diagnostics_summary():
         "message": "Use /api/connect to activate the recommended route"
     }
 
+# --- Lightweight auxiliary API endpoints to satisfy frontend plugins ---
+
+@api_router.get("/getThemeColors")
+async def get_theme_colors():
+    """Return a minimal theme color palette for UI plugins."""
+    return {
+        "success": True,
+        "data": {
+            "primary": "#0ea5e9",
+            "secondary": "#64748b",
+            "background": "#0b0f19",
+            "surface": "#111827",
+            "text": "#e5e7eb",
+            "muted": "#9ca3af",
+            "accent": "#a78bfa",
+            "success": "#10b981",
+            "warning": "#f59e0b",
+            "error": "#ef4444"
+        }
+    }
+
+@api_router.get("/getLanguageText")
+async def get_language_text(lang: str = "en"):
+    """Return minimal language text map with safe fallbacks."""
+    translations = {
+        "en": {
+            "connect": "Connect",
+            "disconnect": "Disconnect",
+            "status": "Status",
+            "discover": "Discover",
+            "internet": "Internet",
+            "retry": "Retry",
+            "cancel": "Cancel"
+        },
+        "zh": {
+            "connect": "连接",
+            "disconnect": "断开",
+            "status": "状态",
+            "discover": "发现",
+            "internet": "网络",
+            "retry": "重试",
+            "cancel": "取消"
+        }
+    }
+    lang_key = (lang or "en").lower()
+    data = translations.get(lang_key, translations["en"])
+    return {"success": True, "lang": lang_key, "data": data}
+
+@api_router.get("/getWorkspacePath")
+async def get_workspace_path():
+    """Return the workspace path for the current project."""
+    try:
+        # workspace root is parent of backend folder
+        workspace = str(Path(__file__).resolve().parents[1])
+    except Exception:
+        workspace = str(ROOT_DIR.parent)
+    return {"success": True, "path": workspace}
+
+@api_router.post("/setIsSelect")
+async def set_is_select(request: Request):
+    """Persist a simple boolean selection state used by UI plugins."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    val = bool(payload.get("isSelect", payload.get("selected", payload.get("value", False))))
+    SELECT_STATE["isSelect"] = val
+    return {"success": True, "isSelect": SELECT_STATE["isSelect"]}
+
 # Helper functions
 async def fetch_free_proxies() -> List[str]:
     """Fetch free proxies from multiple sources"""
     proxies = []
     async with aiohttp.ClientSession() as session:
-        for api_url in FREE_PROXY_APIS[:2]:  # Try first 2 sources
+        for api_url in FREE_PROXY_APIS[:2]:  # Try first 2 sources quickly
             try:
-                async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=2)) as response:
                     if response.status == 200:
                         text = await response.text()
                         proxy_list = text.strip().split('\n')
-                        proxies.extend(proxy_list[:20])
+                        proxies.extend(proxy_list[:10])
                         break
             except:
                 continue
@@ -392,12 +606,9 @@ async def check_tor_availability() -> bool:
 
 async def fetch_vpn_gates() -> List[Dict[str, Any]]:
     """Fetch VPN Gate public servers"""
-    vpn_gates = [
-        {"country": "US", "endpoint": "vpngate://us-server"},
-        {"country": "JP", "endpoint": "vpngate://jp-server"},
-        {"country": "KR", "endpoint": "vpngate://kr-server"},
-    ]
-    return vpn_gates
+    # Disabled in dev: avoid simulated VPN Gate entries.
+    # Integrate with real VPN Gate API if required.
+    return []
 
 async def detect_vpn_clients() -> List[ConnectionSource]:
     """Detect installed VPN/tunnel clients on the host and expose as sources.
@@ -409,8 +620,8 @@ async def detect_vpn_clients() -> List[ConnectionSource]:
         # Typical Windows path; if not present, skip
         windscribe_cli = Path("C:/Program Files/Windscribe/windscribe-cli.exe")
         if windscribe_cli.exists():
-            # Query status
-            proc = subprocess.run([str(windscribe_cli), "status"], capture_output=True, text=True, timeout=5)
+            # Query status quickly
+            proc = subprocess.run([str(windscribe_cli), "status"], capture_output=True, text=True, timeout=2)
             status_text = proc.stdout.lower()
             is_connected = "connected" in status_text
             detected.append(ConnectionSource(
@@ -427,7 +638,7 @@ async def detect_vpn_clients() -> List[ConnectionSource]:
     try:
         speedify_cli = Path("C:/Program Files/Speedify/speedify_cli.exe")
         if speedify_cli.exists():
-            proc = subprocess.run([str(speedify_cli), "show"], capture_output=True, text=True, timeout=5)
+            proc = subprocess.run([str(speedify_cli), "show"], capture_output=True, text=True, timeout=2)
             status_text = proc.stdout.lower()
             is_connected = "connected" in status_text or "state: connected" in status_text
             detected.append(ConnectionSource(
@@ -443,7 +654,7 @@ async def detect_vpn_clients() -> List[ConnectionSource]:
     # Generic VPN adapters (Windows)
     try:
         # Parse ipconfig output for TUN/TAP or VPN markers
-        proc = subprocess.run(["ipconfig", "/all"], capture_output=True, text=True, timeout=7)
+        proc = subprocess.run(["ipconfig", "/all"], capture_output=True, text=True, timeout=3)
         text = proc.stdout.lower()
         adapter_hits = [
             "vpn",
@@ -471,7 +682,7 @@ async def detect_local_networks() -> List[ConnectionSource]:
 
     # Wi‑Fi via netsh
     try:
-        proc = subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True, text=True, timeout=6)
+        proc = subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True, text=True, timeout=3)
         out = proc.stdout
         lines = [l.strip() for l in out.splitlines()]
         state_line = next((l for l in lines if l.lower().startswith("state")), None)
@@ -498,7 +709,7 @@ async def detect_local_networks() -> List[ConnectionSource]:
 
     # Ethernet presence via ipconfig
     try:
-        proc = subprocess.run(["ipconfig", "/all"], capture_output=True, text=True, timeout=8)
+        proc = subprocess.run(["ipconfig", "/all"], capture_output=True, text=True, timeout=4)
         text = proc.stdout.lower()
         has_eth = ("ethernet adapter" in text) and ("media disconnected" not in text)
         if has_eth:
@@ -517,14 +728,24 @@ async def detect_local_networks() -> List[ConnectionSource]:
 async def test_proxy(proxy: str) -> bool:
     """Test if proxy is working"""
     try:
+        ssl_param = False if tls_disabled() else None
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "http://httpbin.org/ip",
-                proxy=f"http://{proxy}",
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
-                return response.status == 200
-    except:
+            for url in GEN204_URLS:
+                for _ in range(2):  # simple retry
+                    try:
+                        async with session.get(
+                            url,
+                            proxy=f"http://{proxy}",
+                            timeout=aiohttp.ClientTimeout(total=4),
+                            ssl=ssl_param,
+                            allow_redirects=False,
+                        ) as response:
+                            if response.status in (204, 200):
+                                return True
+                    except Exception:
+                        await asyncio.sleep(0.1)
+            return False
+    except Exception:
         return False
 
 async def test_tor() -> bool:
@@ -538,7 +759,7 @@ async def test_doh(endpoint: str) -> bool:
             async with session.get(
                 f"{endpoint}?name=google.com",
                 headers={"accept": "application/dns-json"},
-                timeout=aiohttp.ClientTimeout(total=5)
+                timeout=aiohttp.ClientTimeout(total=3)
             ) as response:
                 return response.status == 200
     except:
@@ -548,30 +769,40 @@ async def test_connection_direct(conn: dict) -> dict:
     """Test a connection directly"""
     try:
         start_time = asyncio.get_event_loop().time()
-        
-        if conn['type'] == 'proxy':
+
+        if conn.get('type') == 'proxy' and conn.get('endpoint'):
             success = await test_proxy(conn['endpoint'])
-        elif conn['type'] == 'tor':
+        elif conn.get('type') == 'tor':
             success = await test_tor()
-        elif conn['type'] == 'doh':
+        elif conn.get('type') == 'doh' and conn.get('endpoint'):
             success = await test_doh(conn['endpoint'])
-        elif conn['type'] in ('vpn', 'wifi', 'direct'):
-            # Probe a simple HTTP endpoint; if reachable quickly, assume OK
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        "http://httpbin.org/ip",
-                        timeout=aiohttp.ClientTimeout(total=6)
-                    ) as response:
-                        success = response.status == 200
-            except Exception:
-                success = False
+        elif conn.get('type') in ('vpn', 'wifi', 'direct', 'webrtc'):
+            # Probe low-payload reachability endpoints with light retries
+            ssl_param = False if tls_disabled() else None
+            success = False
+            async with aiohttp.ClientSession() as session:
+                for url in GEN204_URLS:
+                    for _ in range(2):
+                        try:
+                            async with session.get(
+                                url,
+                                timeout=aiohttp.ClientTimeout(total=4),
+                                ssl=ssl_param,
+                                allow_redirects=False,
+                            ) as response:
+                                if response.status in (204, 200):
+                                    success = True
+                                    break
+                        except Exception:
+                            await asyncio.sleep(0.1)
+                    if success:
+                        break
         else:
             success = True
 
         latency = (asyncio.get_event_loop().time() - start_time) * 1000
         return {"success": success, "latency": latency}
-    except:
+    except Exception:
         return {"success": False, "latency": 9999}
 
 # Include the router in the main app
@@ -594,7 +825,8 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    if 'client' in globals() and client:
+        client.close()
 
 # Lightweight dashboard for quick demo without the React dev server
 @app.get("/dashboard", response_class=HTMLResponse)

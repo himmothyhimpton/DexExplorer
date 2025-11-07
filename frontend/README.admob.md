@@ -1,17 +1,25 @@
-# AdMob Rewarded Ads Integration
+# Google Mobile Ads SDK Integration
 
-This app gates the main Connect action behind a rewarded ad using Google Mobile Ads SDK via Capacitor.
+This app integrates Google Mobile Ads SDK via Capacitor for:
+- Rewarded Interstitial (for the unlock gate)
+- Banner (adaptive, bottom)
+- Native Advanced (when supported; falls back to banner)
 
 ## IDs
 
-- App ID: `ca-app-pub-7429469900417746~7081746845`
-- Rewarded Unit: `ca-app-pub-7429469900417746/8580152032`
+- App ID: `ca-app-pub-4730576212175841~6585663640`
+- Rewarded Interstitial Unit: `ca-app-pub-4730576212175841/8282082216`
+- Banner Unit: `ca-app-pub-4730576212175841/1948608155`
+- Native Advanced Unit: `ca-app-pub-4730576212175841/2990227083`
 
-These are already set in `frontend/.env`:
+These are set in `frontend/.env`:
 
 ```
-REACT_APP_ADMOB_APP_ID=ca-app-pub-7429469900417746~7081746845
-REACT_APP_ADMOB_REWARDED_UNIT_ID=ca-app-pub-7429469900417746/8580152032
+REACT_APP_ADMOB_APP_ID=ca-app-pub-4730576212175841~6585663640
+REACT_APP_ADMOB_REWARDED_UNIT_ID=ca-app-pub-4730576212175841/2298826475
+REACT_APP_ADMOB_REWARDED_INTERSTITIAL_UNIT_ID=ca-app-pub-4730576212175841/8282082216
+REACT_APP_ADMOB_BANNER_UNIT_ID=ca-app-pub-4730576212175841/1948608155
+REACT_APP_ADMOB_NATIVE_ADVANCED_UNIT_ID=ca-app-pub-4730576212175841/2990227083
 REACT_APP_ADMOB_DEBUG_AUTO_UNLOCK=false
 ```
 
@@ -23,21 +31,22 @@ REACT_APP_ADMOB_DEBUG_AUTO_UNLOCK=false
    - `npx cap add android`
 3. Sync native:
    - `npx cap sync android`
-4. Add App ID to `AndroidManifest.xml` (if not initializing via code):
-   - In the `application` tag: 
+4. Ensure App ID meta-data exists in `AndroidManifest.xml` (or initialize via code):
+   - In the `application` tag:
      ```xml
      <meta-data
          android:name="com.google.android.gms.ads.APPLICATION_ID"
-         android:value="ca-app-pub-7429469900417746~7081746845"/>
+         android:value="ca-app-pub-4730576212175841~6585663640"/>
      ```
-   - Note: The code also calls `AdMob.initialize({ appId })` as a fallback.
+   - The code also calls `AdMob.initialize({ appId })` on app start.
 5. Open Android Studio and run the app.
 
 ## How It Works
 
-- The Connect button calls a gate helper (`src/lib/adGate.js`).
-- On Android, it uses the native AdMob plugin to show a rewarded ad.
-- On web, it uses a simple confirmation as a simulation to keep development smooth.
+- On app start, `src/lib/admob.js` initializes AdMob.
+- Home screen shows a Native Advanced ad if supported, otherwise an adaptive banner at the bottom.
+- The Connect action calls a gate helper (`src/lib/adGate.js`) that presents a Rewarded Interstitial on Android.
+- On web, a simple confirmation simulates the gate to keep dev smooth.
 - After reward, `localStorage.reward_unlocked = '1'` enables Connect without re-watching.
 
 ## Testing Tips
@@ -55,9 +64,9 @@ REACT_APP_ADMOB_DEBUG_AUTO_UNLOCK=false
 
 ## Next Steps
 
-- Replace the web fallback with real rewarded ads after installing the plugin.
-- Add banners/interstitials where appropriate, respecting policy and UX.
+- Configure test devices or use Google-provided test unit IDs during development.
 - Consider frequency capping and graceful failure (e.g., allow limited free connects if ad fails).
+- Add analytics on ad load/show/fail to monitor revenue and UX.
 
 ## CI Build Notes
 

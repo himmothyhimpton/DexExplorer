@@ -88,6 +88,25 @@ jobs:
           cd frontend
           npx cap sync android
 
+      - name: Align AGP/Kotlin across modules
+        shell: bash
+        run: |
+          set -e
+          # Capacitor core module
+          if [ -f "frontend/node_modules/@capacitor/android/capacitor/build.gradle" ]; then
+            sed -i "s/com.android.tools.build:gradle:8.2.1/com.android.tools.build:gradle:8.7.0/" frontend/node_modules/@capacitor/android/capacitor/build.gradle || true
+            sed -i "s/ext.kotlin_version = .*'1.9.10'/ext.kotlin_version = project.hasProperty(\"kotlin_version\") ? rootProject.ext.kotlin_version : '1.9.24'/" frontend/node_modules/@capacitor/android/capacitor/build.gradle || true
+          fi
+          # Capacitor community admob plugin module
+          if [ -f "frontend/node_modules/@capacitor-community/admob/android/build.gradle" ]; then
+            sed -i "s/com.android.tools.build:gradle:8.2.1/com.android.tools.build:gradle:8.7.0/" frontend/node_modules/@capacitor-community/admob/android/build.gradle || true
+            sed -i "s/ext.kotlin_version = .*'1.9.10'/ext.kotlin_version = project.hasProperty(\"kotlin_version\") ? rootProject.ext.kotlin_version : '1.9.24'/" frontend/node_modules/@capacitor-community/admob/android/build.gradle || true
+          fi
+          # Cordova android plugins bridge inside android project
+          if [ -f "frontend/android/capacitor-cordova-android-plugins/build.gradle" ]; then
+            sed -i "s/com.android.tools.build:gradle:8.2.1/com.android.tools.build:gradle:8.7.0/" frontend/android/capacitor-cordova-android-plugins/build.gradle || true
+          fi
+
       - name: Force Android SDK versions to 34
         run: |
           FILE="frontend/android/variables.gradle"
@@ -99,16 +118,44 @@ jobs:
             sed -i 's/compileSdkVersion [0-9]\+/compileSdkVersion 34/' "$FILE" || true
             sed -i 's/targetSdkVersion [0-9]\+/targetSdkVersion 34/' "$FILE" || true
           fi
+
+      - name: Set versionCode and versionName for release
+        run: |
+          APP_GRADLE="frontend/android/app/build.gradle"
+          VERSION_CODE=$((100000 + $GITHUB_RUN_NUMBER))
+          VERSION_NAME="1.0.$GITHUB_RUN_NUMBER"
+          sed -i "s/versionCode [0-9]\+/versionCode ${VERSION_CODE}/" "$APP_GRADLE"
+          sed -i 's/versionName "[^"]\+"/versionName "'"${VERSION_NAME}"'"/' "$APP_GRADLE"
+
+      - name: Prepare signing keystore
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_ALIAS_PASSWORD: ${{ secrets.ANDROID_KEY_ALIAS_PASSWORD }}
+        run: |
+          set -e
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "No ANDROID_KEYSTORE_BASE64 secret provided; skipping signing setup."
+            exit 0
+          fi
+          mkdir -p frontend/android
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > frontend/android/upload-keystore.jks
+          echo "ANDROID_KEYSTORE_PATH=frontend/android/upload-keystore.jks" >> $GITHUB_ENV
+          echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> $GITHUB_ENV
+          echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> $GITHUB_ENV
+          echo "ANDROID_KEY_ALIAS_PASSWORD=$ANDROID_KEY_ALIAS_PASSWORD" >> $GITHUB_ENV
           
       - name: Build Android APK
         run: |
           cd frontend/android
           ./gradlew assembleDebug
           
-      - name: Build Android App Bundle (unsigned release)
+      - name: Build signed release AAB and APK (if signing provided)
         run: |
           cd frontend/android
-          ./gradlew bundleRelease
+          ./gradlew bundleRelease assembleRelease
           
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -119,8 +166,14 @@ jobs:
       - name: Upload AAB
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-unsigned
+          name: app-release-signed-aab
           path: frontend/android/app/build/outputs/bundle/release/app-release.aab
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-signed
+          path: frontend/android/app/build/outputs/apk/release/app-release.apk
 
       - name: Publish release with APK & AAB
         uses: softprops/action-gh-release@v1
@@ -133,3 +186,14 @@ jobs:
           files: |
             frontend/android/app/build/outputs/apk/debug/app-debug.apk
             frontend/android/app/build/outputs/bundle/release/app-release.aab
+            frontend/android/app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload to Google Play (internal track)
+        if: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON != '' }}
+        uses: r0adkll/upload-google-play@v3
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.fluxcapacitor.app
+          releaseFiles: frontend/android/app/build/outputs/bundle/release/app-release.aab
+          track: internal
+          status: completed
