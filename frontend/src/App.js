@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import '@/App.css';
-import axios from 'axios';
+import { http } from '@/lib/http';
 import { API_BASE } from '@/lib/apiBase';
 import { Wifi, Zap, Globe, Lock, Activity, Satellite, Radio, Network, Info } from 'lucide-react';
 import { ensureRewardGate } from '@/lib/adGate';
@@ -141,7 +141,7 @@ function App() {
   const checkStatus = async () => {
     try {
       // Avoid premature aborts; allow the backend a bit longer in dev
-      const response = await axios.get(`${API}/status`, { timeout: 10000 });
+      const response = await http.get(`${API}/status`, { timeout: 10000 });
       const data = response.data;
       setStats({
         active: data.active_connections,
@@ -163,7 +163,7 @@ function App() {
     setStatus('discovering');
     try {
       const response = await retry(
-        () => axios.get(`${API}/discover`, { timeout: 12000 }),
+        () => http.get(`${API}/discover`, { timeout: 12000 }),
         { retries: 1, delay: 700 }
       );
       setConnections(response.data);
@@ -190,7 +190,7 @@ function App() {
 
   const loadSummary = async () => {
     try {
-      const res = await retry(() => axios.get(`${API}/diagnostics/summary`, { timeout: 10000 }), { retries: 1, delay: 500 });
+      const res = await retry(() => http.get(`${API}/diagnostics/summary`, { timeout: 10000 }), { retries: 1, delay: 500 });
       const data = res.data || {};
       setSummary(data);
       // Build a quick lookup map by endpoint for latency and success flags
@@ -221,7 +221,7 @@ function App() {
       await discoverConnections();
       
       // Then auto-connect to best one
-      const response = await retry(() => axios.post(`${API}/connect`, null, { timeout: 15000 }), { retries: 1, delay: 1000 });
+      const response = await retry(() => http.post(`${API}/connect`, null, { timeout: 15000 }), { retries: 1, delay: 1000 });
       
       if (response.data.success || response.data.connection) {
         setConnected(true);
@@ -291,13 +291,12 @@ function App() {
     try {
       // Read raw text to avoid implicit JSON.parse throwing on HTML responses
       const response = await retry(
-        () => axios.post(
+        () => http.post(
           `${API}/proxy`,
           { url: urlToLoad, method: 'GET' },
           {
             timeout: 12000,
             responseType: 'text',
-            transformResponse: [(data) => data],
             validateStatus: (status) => status >= 200 && status < 500,
             signal: pageControllerRef.current.signal,
           }
@@ -390,7 +389,7 @@ function App() {
   const verifyTargetAvailability = async (url) => {
     try {
       const res = await retry(
-        () => axios.post(
+        () => http.post(
           `${API}/proxy`,
           { url, method: 'HEAD', headers: { 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' } },
           { timeout: 10000 }
@@ -428,7 +427,7 @@ function App() {
       }
       // Fresh discovery for accurate candidates
       const disc = await retry(
-        () => axios.get(`${API}/discover`, { timeout: 12000, signal: connectControllerRef.current.signal }),
+        () => http.get(`${API}/discover`, { timeout: 12000, signal: connectControllerRef.current.signal }),
         { retries: 1, delay: 700 }
       );
       const discovered = disc.data || [];
@@ -440,7 +439,7 @@ function App() {
       let testedMapLocal = {};
       try {
         const diag = await retry(
-          () => axios.get(`${API}/diagnostics/summary`, { timeout: 10000, signal: connectControllerRef.current.signal }),
+          () => http.get(`${API}/diagnostics/summary`, { timeout: 10000, signal: connectControllerRef.current.signal }),
           { retries: 1, delay: 500 }
         );
         const tested = diag.data?.tested || [];
@@ -492,7 +491,7 @@ function App() {
 
       const endpoint = best?.conn?.endpoint || candidates[0].endpoint;
       const res = await retry(
-        () => axios.post(`${API}/connect`, { endpoint }, { timeout: 15000, signal: connectControllerRef.current.signal }),
+        () => http.post(`${API}/connect`, { endpoint }, { timeout: 15000, signal: connectControllerRef.current.signal }),
         { retries: 1, delay: 700 }
       );
       if (res.data?.success || res.data?.connection) {
@@ -957,7 +956,7 @@ function App() {
                           if (!unlocked) { setStatus('failed'); return; }
                           try {
                             setStatus('connecting');
-                            const res = await axios.post(`${API}/connect`, { endpoint: conn.endpoint });
+                            const res = await http.post(`${API}/connect`, { endpoint: conn.endpoint });
                             if (res.data?.success) {
                               setConnected(true);
                               setActiveConnection(res.data.connection);
