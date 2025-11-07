@@ -27,8 +27,13 @@ if (process.env.NODE_ENV === "development") {
 }
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+// In development, avoid StrictMode double-invocation that can cause duplicate effects/aborts
+if (process.env.NODE_ENV === 'development') {
+  root.render(<App />);
+} else {
+  root.render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  );
+}

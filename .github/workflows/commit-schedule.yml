@@ -1,0 +1,41 @@
+name: Commit Schedule Monitor
+
+on:
+  schedule:
+    - cron: '0 9 * * *' # daily at 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-activity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const daysMax = Number(process.env.MAX_DAYS_WITHOUT_PUSH || (process.env.INPUT_MAX_DAYS || 7));
+            const now = new Date();
+            const since = new Date(now.getTime() - daysMax * 24*60*60*1000).toISOString();
+            const { owner, repo } = context.repo;
+            const commits = await github.rest.repos.listCommits({ owner, repo, since });
+            if (commits.data.length > 0) {
+              console.log(`Recent commits found: ${commits.data.length}`);
+              return;
+            }
+            const title = `📉 No commits in the last ${daysMax} days`;
+            const body = `This repository has not received commits in the last ${daysMax} days.\n` +
+              `Please push changes or update the roadmap to avoid stagnation.`;
+            const existing = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${owner}/${repo} in:title ${title}`
+            });
+            if (existing.data.total_count === 0) {
+              await github.rest.issues.create({ owner, repo, title, body, labels: ['activity', 'notice'] });
+            } else {
+              console.log('Notice already exists.');
+            }
+        env:
+          MAX_DAYS_WITHOUT_PUSH: ${{ vars.MAX_DAYS_WITHOUT_PUSH }}
+

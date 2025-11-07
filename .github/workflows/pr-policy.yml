@@ -1,0 +1,30 @@
+name: PR Policy
+
+on:
+  pull_request:
+    types: [opened, edited, ready_for_review, synchronize]
+
+permissions:
+  pull-requests: read
+  statuses: write
+
+jobs:
+  enforce-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const criticalBranches = ['main', 'master', 'release'];
+            const target = pr.base.ref;
+            const requiresReview = criticalBranches.some(b => target.startsWith(b));
+            if (!requiresReview) {
+              return core.notice('PR not targeting a critical branch.');
+            }
+            const hasRequested = (pr.requested_reviewers && pr.requested_reviewers.length > 0) ||
+              (pr.requested_teams && pr.requested_teams.length > 0);
+            if (!hasRequested) {
+              core.setFailed('Code review required: request at least one reviewer/team.');
+            }
+

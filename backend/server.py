@@ -119,6 +119,7 @@ GEN204_URLS = [
     "http://www.gstatic.com/generate_204",
     "https://connectivitycheck.gstatic.com/generate_204",
     "http://example.com",
+    "http://neverssl.com/",
 ]
 
 def tls_disabled() -> bool:
@@ -743,7 +744,19 @@ async def test_proxy(proxy: str) -> bool:
                             if response.status in (204, 200):
                                 return True
                     except Exception:
-                        await asyncio.sleep(0.1)
+                        # TLS handshake or cert issues? Try once with SSL disabled.
+                        try:
+                            async with session.get(
+                                url,
+                                proxy=f"http://{proxy}",
+                                timeout=aiohttp.ClientTimeout(total=4),
+                                ssl=False,
+                                allow_redirects=False,
+                            ) as response:
+                                if response.status in (204, 200):
+                                    return True
+                        except Exception:
+                            await asyncio.sleep(0.1)
             return False
     except Exception:
         return False
@@ -794,7 +807,19 @@ async def test_connection_direct(conn: dict) -> dict:
                                     success = True
                                     break
                         except Exception:
-                            await asyncio.sleep(0.1)
+                            # Fallback attempt with SSL disabled to bypass MITM/cert issues
+                            try:
+                                async with session.get(
+                                    url,
+                                    timeout=aiohttp.ClientTimeout(total=4),
+                                    ssl=False,
+                                    allow_redirects=False,
+                                ) as response:
+                                    if response.status in (204, 200):
+                                        success = True
+                                        break
+                            except Exception:
+                                await asyncio.sleep(0.1)
                     if success:
                         break
         else:

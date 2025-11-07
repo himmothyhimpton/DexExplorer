@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import '@/App.css';
 import { http } from '@/lib/http';
 import { API_BASE } from '@/lib/apiBase';
-import { Wifi, Zap, Globe, Lock, Activity, Satellite, Radio, Network, Info } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
+import { Wifi, Zap, Globe, Lock, Activity, Satellite, Radio, Network, Info, ChevronLeft, ChevronRight, RotateCcw, Home as HomeIcon } from 'lucide-react';
 import { ensureRewardGate } from '@/lib/adGate';
 import { initAdMob, showBanner, hideBanner, showNativeAdvanced } from '@/lib/admob';
 import { retry } from '@/lib/retry';
@@ -11,31 +12,41 @@ import LightningOverlay from '@/components/LightningOverlay';
 const API = API_BASE;
 
 // Memoized iframe to keep resource loads alive across parent re-renders
-const BrowserFrame = React.memo(({ content }) => {
+const BrowserFrame = React.memo(({ content, url }) => {
   const iframeRef = useRef(null);
-  const last = useRef('');
+  const lastDoc = useRef('');
+  const lastUrl = useRef('');
   useEffect(() => {
     const iframe = iframeRef.current;
     if (!iframe) return;
-    if (typeof content === 'string' && content !== last.current) {
-      last.current = content;
+    // Prefer srcdoc when content is present (proxied/Tor), else use direct src URL
+    if (typeof content === 'string' && content.length > 0 && content !== lastDoc.current) {
+      lastDoc.current = content;
       try {
         iframe.srcdoc = content;
       } catch {}
+    } else if (typeof url === 'string' && url.length > 0 && url !== lastUrl.current) {
+      lastUrl.current = url;
+      try {
+        iframe.src = url;
+      } catch {}
     }
-  }, [content]);
+  }, [content, url]);
   return (
     <iframe
       ref={iframeRef}
       title="preview"
-      sandbox="allow-same-origin allow-forms allow-scripts"
-      srcDoc={last.current}
+      sandbox="allow-same-origin allow-forms allow-scripts allow-top-navigation-by-user-activation"
+      src={lastDoc.current ? undefined : (lastUrl.current || undefined)}
+      srcDoc={lastDoc.current || undefined}
       className="w-full h-full rounded-lg bg-white"
     />
   );
 });
 
 function App() {
+  const platform = (Capacitor?.getPlatform?.() || 'web');
+  const isWebPlatform = platform === 'web';
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState('idle');
@@ -58,6 +69,8 @@ function App() {
   const [showLegend, setShowLegend] = useState(false);
   const [incognito, setIncognito] = useState(false);
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [urlHistory, setUrlHistory] = useState([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
 
   // Browser-first: require user to choose mode before showing browser
   const [browseMode, setBrowseMode] = useState(() => {
@@ -106,20 +119,23 @@ function App() {
     }
   }, [browserUrl, incognito]);
 
-  // When mode changes, open browser and set default homepage, then scroll
+  // When mode changes, just set the default homepage and reset incognito.
+  // Do NOT auto-open the browser here; handleModeSelect manages connect + open.
   useEffect(() => {
     if (!browseMode) return;
     if (browseMode === 'light') setBrowserUrl(LIGHT_HOME);
     if (browseMode === 'dark') setBrowserUrl(DARK_HOME);
-    // Leaving incognito as a toggle within Normal mode; reset it when switching modes
     setIncognito(false);
-    setShowBrowser(true);
-    setTimeout(scrollToBrowser, 50);
   }, [browseMode]);
 
   // Check backend status once on load; poll only when connected
   useEffect(() => {
     checkStatus();
+  }, []);
+
+  // Pull diagnostics summary early so compact card has data
+  useEffect(() => {
+    loadSummary();
   }, []);
 
   // Initialize AdMob and place ads on home
@@ -217,8 +233,21 @@ function App() {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) {
         throw new Error('No network detected');
       }
-      // First discover sources
-      await discoverConnections();
+      // Pull diagnostics first (includes discovery internally) to reduce duplicate calls
+      try {
+        const res = await retry(() => http.get(`${API}/diagnostics/summary`, { timeout: 12000 }), { retries: 1, delay: 600 });
+        const data = res.data || {};
+        setSummary(data);
+        const map = {};
+        (data.tested || []).forEach((t) => { if (t && t.endpoint) map[t.endpoint] = { latency: t.latency, success: t.tested_success }; });
+        setTestedMap(map);
+        // Treat tested entries as discovered candidates for UI purposes
+        setConnections(data.tested || []);
+        setDiscoveredCount((data.tested || []).length);
+        setStatus('discovered');
+      } catch (_) {
+        // If diagnostics not available, continue; backend /connect will discover
+      }
       
       // Then auto-connect to best one
       const response = await retry(() => http.post(`${API}/connect`, null, { timeout: 15000 }), { retries: 1, delay: 1000 });
@@ -257,6 +286,48 @@ function App() {
   const pageControllerRef = useRef(null);
   const connectControllerRef = useRef(null);
 
+  // Simple URL history helpers for overlay toolbar
+  const addToHistory = (url) => {
+    if (!url || typeof url !== 'string') return;
+    setUrlHistory((prev) => {
+      const upto = historyIndex >= 0 ? prev.slice(0, historyIndex + 1) : [];
+      const next = [...upto, url];
+      // Keep index in sync with new list
+      setHistoryIndex(next.length - 1);
+      return next;
+    });
+  };
+  const handleBack = async () => {
+    if (historyIndex <= 0) return;
+    const newIndex = historyIndex - 1;
+    const target = urlHistory[newIndex];
+    setHistoryIndex(newIndex);
+    if (target) {
+      setBrowserUrl(target);
+      await loadWebpage(target);
+    }
+  };
+  const handleForward = async () => {
+    if (historyIndex < 0) return;
+    const newIndex = historyIndex + 1;
+    if (newIndex >= urlHistory.length) return;
+    const target = urlHistory[newIndex];
+    setHistoryIndex(newIndex);
+    if (target) {
+      setBrowserUrl(target);
+      await loadWebpage(target);
+    }
+  };
+  const handleReload = async () => {
+    if (!browserUrl) return;
+    await loadWebpage(browserUrl);
+  };
+  const handleHome = async () => {
+    const homepage = browseMode === 'dark' ? DARK_HOME : LIGHT_HOME;
+    setBrowserUrl(homepage);
+    await loadWebpage(homepage);
+  };
+
   const loadWebpage = async (urlOverride = null) => {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       alert('No network detected. Check Wi‑Fi or Ethernet and try again.');
@@ -284,6 +355,38 @@ function App() {
       setShowBrowser(true);
       return;
     }
+    // For sites that block embedding, detect via HEAD and fallback to proxy srcdoc
+    let mustUseProxy = false;
+    try {
+      const headRes = await retry(
+        () => http.post(
+          `${API}/proxy`,
+          { url: urlToLoad, method: 'HEAD', headers: { 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' } },
+          { timeout: 7000 }
+        ),
+        { retries: 0 }
+      );
+      const rawHeaders = (headRes?.data?.headers) || {};
+      const headers = {};
+      Object.keys(rawHeaders).forEach((k) => { headers[(k || '').toLowerCase()] = rawHeaders[k]; });
+      const xfo = headers['x-frame-options'] || '';
+      const csp = headers['content-security-policy'] || '';
+      if (/deny|sameorigin/i.test(xfo) || /frame-ancestors/i.test(csp)) {
+        mustUseProxy = true;
+      }
+    } catch (_) {}
+
+    // If we are on a direct/wifi/vpn route, prefer a real iframe src load unless blocked
+    const useProxy = mustUseProxy || (activeConnection?.type === 'tor') || (activeConnection?.type === 'proxy');
+    if (!useProxy) {
+      setBrowserContent('');
+      setBrowserUrl(urlToLoad);
+      setShowBrowser(true);
+      setStatus('browsing');
+      addToHistory(urlToLoad);
+      return;
+    }
+
     setStatus('loading');
     // Cancel any in-flight page load and start a fresh controller
     try { pageControllerRef.current?.abort?.(); } catch {}
@@ -341,9 +444,35 @@ function App() {
           decoded = `<head><base href="${origin}"></head>` + decoded;
         }
       } catch {}
+
+      // Neutralize History API inside srcdoc to avoid SecurityError from cross-origin URLs
+      try {
+        const historyStub = '<script>(function(){try{var h=window.history; h.pushState=function(){ }; h.replaceState=function(){ }; }catch(e){}})();<\/script>';
+        if (/<head[^>]*>/i.test(decoded)) {
+          decoded = decoded.replace(/<head[^>]*>/i, (m) => `${m}${historyStub}`);
+        } else if (/<html[^>]*>/i.test(decoded)) {
+          decoded = decoded.replace(/<html[^>]*>/i, (m) => `${m}<head>${historyStub}</head>`);
+        } else {
+          decoded = `<head>${historyStub}</head>` + decoded;
+        }
+      } catch {}
+
+      // Intercept window.open and _blank anchors to keep navigation inside overlay
+      try {
+        const navStub = '<script>(function(){try{var open=window.open;window.open=function(u){try{window.parent.postMessage({type:\"flux:navigate\",url:u},\"*\");}catch(e){} return null;};document.addEventListener("click",function(e){var a=e.target.closest("a");if(a&&a.target==="_blank"&&a.href){e.preventDefault();try{window.parent.postMessage({type:\"flux:navigate\",url:a.href},\"*\");}catch(e){} }},true);}catch(e){} })();<\/script>';
+        if (/<head[^>]*>/i.test(decoded)) {
+          decoded = decoded.replace(/<head[^>]*>/i, (m) => `${m}${navStub}`);
+        } else if (/<html[^>]*>/i.test(decoded)) {
+          decoded = decoded.replace(/<html[^>]*>/i, (m) => `${m}<head>${navStub}</head>`);
+        } else {
+          decoded = `<head>${navStub}</head>` + decoded;
+        }
+      } catch {}
       setBrowserContent(decoded);
+      setBrowserUrl(urlToLoad);
       setShowBrowser(true);
       setStatus('browsing');
+      addToHistory(urlToLoad);
     } catch (error) {
       // Ignore intentional cancellations (new request supersedes prior)
       const emsg = error?.message || '';
@@ -364,13 +493,31 @@ function App() {
     }
   };
 
+  // Listen for navigation messages from iframe srcdoc to load inside overlay
+  useEffect(() => {
+    const onMsg = (e) => {
+      const d = e?.data || {};
+      if (d && d.type === 'flux:navigate' && typeof d.url === 'string') {
+        setBrowserUrl(d.url);
+        loadWebpage(d.url);
+      }
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('message', onMsg);
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('message', onMsg);
+      }
+    };
+  }, []);
+
   // Hide banner/native when browser overlay is visible; show when hidden
   useEffect(() => {
     (async () => {
       if (showBrowser) {
-        await hideBanner();
+        await showBanner();
       } else {
-        // Attempt native again; otherwise use banner
         const ok = await showNativeAdvanced({ position: 'BOTTOM', size: 'MEDIUM' });
         if (!ok) await showBanner();
       }
@@ -425,22 +572,13 @@ function App() {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) {
         throw new Error('No network detected');
       }
-      // Fresh discovery for accurate candidates
-      const disc = await retry(
-        () => http.get(`${API}/discover`, { timeout: 12000, signal: connectControllerRef.current.signal }),
-        { retries: 1, delay: 700 }
-      );
-      const discovered = disc.data || [];
-      setConnections(discovered);
-      setDiscoveredCount(discovered.length);
-      setStatus('discovered');
-
-      // Pull diagnostics for latency and success
+      // Pull diagnostics first (includes discovery internally) to reduce duplicate calls
       let testedMapLocal = {};
+      let discovered = [];
       try {
         const diag = await retry(
-          () => http.get(`${API}/diagnostics/summary`, { timeout: 10000, signal: connectControllerRef.current.signal }),
-          { retries: 1, delay: 500 }
+          () => http.get(`${API}/diagnostics/summary`, { timeout: 12000, signal: connectControllerRef.current.signal }),
+          { retries: 1, delay: 600 }
         );
         const tested = diag.data?.tested || [];
         tested.forEach((t) => {
@@ -448,12 +586,26 @@ function App() {
         });
         setSummary(diag.data || {});
         setTestedMap(testedMapLocal);
+        discovered = tested;
+        setConnections(discovered);
+        setDiscoveredCount(discovered.length);
+        setStatus('discovered');
       } catch (e) {
-        // Continue without diagnostics if unavailable
+        // Fallback to explicit discovery only if diagnostics failed
+        try {
+          const disc = await retry(
+            () => http.get(`${API}/discover`, { timeout: 8000, signal: connectControllerRef.current.signal }),
+            { retries: 0 }
+          );
+          discovered = disc.data || [];
+          setConnections(discovered);
+          setDiscoveredCount(discovered.length);
+          setStatus('discovered');
+        } catch (_) {}
       }
 
       // Filter to mode-required types
-      const candidates = discovered.filter((c) => req.requiredTypes.includes(c.type));
+      const candidates = (discovered || []).filter((c) => req.requiredTypes.includes(c.type));
       if (candidates.length === 0) {
         setStatus('failed');
         // Keep browser visible with guidance
@@ -489,7 +641,7 @@ function App() {
         }
       }
 
-      const endpoint = best?.conn?.endpoint || candidates[0].endpoint;
+      const endpoint = best?.conn?.endpoint || (candidates[0] && candidates[0].endpoint);
       const res = await retry(
         () => http.post(`${API}/connect`, { endpoint }, { timeout: 15000, signal: connectControllerRef.current.signal }),
         { retries: 1, delay: 700 }
@@ -543,22 +695,15 @@ function App() {
     // Set mode and target homepage
     setBrowseMode(mode);
     const req = getRequirementsForMode(mode);
-    setBrowserUrl(req.homepage);
-    setShowBrowser(true);
     setStatus('connecting');
-    // Kick off connection in the background; proxy will auto-connect if needed
-    connectForMode(mode).catch((err) => {
-      const msg = err?.message || '';
-      if (!/ABORTED|canceled/i.test(msg)) {
-        console.debug('Background connect error:', msg);
-      }
-    });
-
-    // Load the homepage immediately for a seamless redirect
+    // Connect first to reduce overlapping requests and aborts
+    await connectForMode(mode);
+    // Then load the homepage once the route is active
     await loadWebpage(req.homepage);
   };
 
   // Auto-entry redirect: support query param ?entry=dark|light or ?mode=dark|light
+  // If nothing is specified or saved, stay on main screen until user chooses.
   useEffect(() => {
     if (typeof window === 'undefined') return;
     try {
@@ -569,6 +714,8 @@ function App() {
       if (chosen) {
         // Delay slightly to allow initial status fetch
         setTimeout(() => handleModeSelect(chosen), 200);
+      } else {
+        setShowBrowser(false);
       }
     } catch (_) {}
   }, []);
@@ -587,6 +734,38 @@ function App() {
       return;
     }
     await connectForMode(browseMode);
+  };
+
+  const handleOptimize = async () => {
+    const unlocked = await ensureRewardGate();
+    if (!unlocked) { setStatus('failed'); return; }
+    try {
+      setStatus('connecting');
+      // Prefer recommendation endpoint if available; else fall back to mode selection
+      const endpoint = summary?.recommendation?.endpoint;
+      if (endpoint) {
+        const res = await retry(() => http.post(`${API}/connect`, { endpoint }, { timeout: 15000 }), { retries: 1, delay: 700 });
+        if (res.data?.success || res.data?.connection) {
+          setConnected(true);
+          setActiveConnection(res.data.connection);
+          setStatus('connected');
+          await checkStatus();
+        } else {
+          setStatus('failed');
+        }
+      } else {
+        const type = (summary?.recommendation?.type || '').toLowerCase();
+        const mode = type === 'tor' ? 'dark' : 'light';
+        await connectForMode(mode);
+      }
+    } catch (e) {
+      if (process.env.NODE_ENV === 'development') {
+        console.debug('Optimize failed:', e?.message || e);
+      } else {
+        console.error('Optimize failed:', e);
+      }
+      setStatus('failed');
+    }
   };
 
   const getStatusColor = () => {
@@ -637,8 +816,8 @@ function App() {
   const speedLabel = (latency) => {
     if (latency == null) return 'Unknown';
     const ms = Math.round(latency);
-    if (ms < 100) return 'Fast';
-    if (ms < 300) return 'Moderate';
+    if (ms < 300) return 'Fast';
+    if (ms < 800) return 'Moderate';
     return 'Slow';
   };
 
@@ -666,6 +845,10 @@ function App() {
               <div className="flex items-center gap-2">
                 <Activity className={`w-5 h-5 ${(connected && isOnline) ? 'text-emerald-400 animate-pulse' : 'text-gray-500'}`} />
                 <span className="text-sm">{!isOnline ? 'OFFLINE' : (connected ? 'ONLINE' : 'OFFLINE')}</span>
+              </div>
+              <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-white/10">
+                <span className="text-xs font-medium">Mode:</span>
+                <span className={`text-xs font-medium ${browseMode === 'dark' ? 'text-purple-300' : 'text-blue-300'}`}>{browseMode ? (browseMode === 'dark' ? 'Dark Web' : 'Normal') : '—'}</span>
               </div>
               {stats.active > 0 && (
                 <div className="flex items-center gap-2 px-3 py-1 bg-emerald-500/20 rounded-full">
@@ -723,6 +906,44 @@ function App() {
                 {status === 'loading' && '📡 Loading webpage...'}
               </div>
             )}
+
+            {isWebPlatform && (
+              <div className="mt-6 flex justify-center">
+                <div className="w-[320px] h-[50px] bg-white/10 border border-white/20 rounded-lg flex items-center justify-center text-xs text-gray-300">
+                  Ad Placeholder (Banner)
+                </div>
+              </div>
+            )}
+
+            {/* Compact Diagnostics Card */}
+            {Object.keys(summary.counts_by_type || {}).length > 0 && (
+              <div className="mt-6 max-w-3xl mx-auto p-4 bg-white/5 border border-white/10 rounded-xl text-left">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-blue-400" />
+                    <span className="text-sm font-semibold">Diagnostics</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={loadSummary} className="text-xs px-2 py-1 bg-white/10 border border-white/10 rounded hover:bg-white/20">Refresh</button>
+                    <button onClick={handleOptimize} className="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 rounded">Optimize</button>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {Object.entries(summary.counts_by_type || {}).map(([type, count]) => (
+                    <span key={type} className="text-[11px] px-2 py-1 rounded bg-white/10 border border-white/10">
+                      {type.toUpperCase()}: {count}
+                    </span>
+                  ))}
+                </div>
+                {summary.recommendation && (
+                  <div className="text-xs text-gray-300">
+                    <span className="font-medium">Recommended:</span> {summary.recommendation.type?.toUpperCase() || '—'}
+                    {' '}• Privacy {privacyLabel(summary.recommendation.anonymity_level)}
+                    {' '}• Latency {summary.recommendation.latency ? `${Math.round(summary.recommendation.latency)}ms` : 'Unknown'}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Pre-Browser Mode Selection removed to simplify initial page to two buttons only */}
@@ -736,8 +957,8 @@ function App() {
                     <Globe className="w-5 h-5 text-blue-400" />
                     <span className="text-lg font-semibold">Secure Browser</span>
                   </div>
-                  <button className="text-sm px-3 py-2 bg-white/10 border border-white/10 rounded hover:bg-white/20" onClick={() => { if (incognito) { setBrowserContent(''); setBrowserUrl('https://duckduckgo.com/'); } setShowBrowser(false); setBrowseMode(null); }}>
-                    Back
+                  <button className="text-sm px-3 py-2 bg-white/10 border border-white/10 rounded hover:bg-white/20" onClick={() => { if (incognito) { setBrowserContent(''); setBrowserUrl(LIGHT_HOME); } setShowBrowser(false); setBrowseMode(null); }}>
+                    Exit
                   </button>
                 </div>
 
@@ -757,7 +978,7 @@ function App() {
                 </div>
 
                 {/* URL Bar */}
-                <div className="flex gap-2 mb-4">
+                <div className="flex flex-wrap gap-2 mb-4">
                   <input
                     type="text"
                     value={browserUrl}
@@ -765,14 +986,31 @@ function App() {
                     onKeyPress={(e) => e.key === 'Enter' && loadWebpage()}
                     placeholder="Enter URL (e.g., https://example.com)"
                     data-testid="url-input"
-                    className="flex-1 px-4 py-3 bg-white/10 border border-white/20 rounded-lg focus:outline-none focus:border-gray-400 transition-colors"
+                    className="min-w-0 flex-1 px-4 py-3 bg-white/10 border border-white/20 rounded-lg focus:outline-none focus:border-gray-400 transition-colors"
                   />
                   <button
                     onClick={() => loadWebpage()}
                     data-testid="load-button"
                     disabled={!isOnline}
-                    className={`px-6 py-3 rounded-lg font-semibold transition-colors ${(connected && isOnline) ? 'bg-blue-500 hover:bg-blue-600' : 'bg-slate-700 cursor-not-allowed'}`}
+                    className={`flex-shrink-0 w-full sm:w-auto px-6 py-3 rounded-lg font-semibold transition-colors ${(connected && isOnline) ? 'bg-blue-500 hover:bg-blue-600' : 'bg-slate-700 cursor-not-allowed'}`}
                   >GO</button>
+                </div>
+
+                {/* Simple Overlay Toolbar */}
+                <div className="flex items-center gap-2 mb-3">
+                  <button onClick={handleBack} disabled={historyIndex <= 0} className={`px-2 py-2 rounded border ${historyIndex <= 0 ? 'bg-slate-800 border-white/10 text-gray-500' : 'bg-white/10 border-white/20 hover:bg-white/15'}`} title="Back">
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button onClick={handleForward} disabled={historyIndex < 0 || historyIndex >= urlHistory.length - 1} className={`px-2 py-2 rounded border ${(historyIndex < 0 || historyIndex >= urlHistory.length - 1) ? 'bg-slate-800 border-white/10 text-gray-500' : 'bg-white/10 border-white/20 hover:bg-white/15'}`} title="Forward">
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                  <button onClick={handleReload} className="px-2 py-2 rounded border bg-white/10 border-white/20 hover:bg-white/15" title="Reload">
+                    <RotateCcw className="w-4 h-4" />
+                  </button>
+                  <button onClick={handleHome} className="px-2 py-2 rounded border bg-white/10 border-white/20 hover:bg-white/15" title="Home">
+                    <HomeIcon className="w-4 h-4" />
+                  </button>
+                  <span className="ml-2 text-xs text-gray-300">{activeConnection ? `${activeConnection.type?.toUpperCase?.() || '—'} • ${speedLabel(activeConnection.latency)}` : 'No route'}</span>
                 </div>
 
                 {!connected && (
@@ -790,13 +1028,21 @@ function App() {
                 {/* Browser Content */}
                 <div className="bg-white rounded-lg p-0 text-black h-[70vh] overflow-hidden" data-testid="browser-content">
                   {showBrowser ? (
-                    <BrowserFrame content={browserContent} />
+                    <BrowserFrame content={browserContent} url={browserUrl} />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-gray-700">
                       Browser is ready. Enter a URL and press GO.
                     </div>
                   )}
                 </div>
+
+                {isWebPlatform && (
+                  <div className="fixed bottom-2 left-0 right-0 flex justify-center px-4">
+                    <div className="w-[320px] h-[50px] bg-white/10 border border-white/20 rounded-lg flex items-center justify-center text-xs text-gray-300">
+                      Ad Placeholder (Banner)
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

@@ -1,0 +1,69 @@
+name: Metrics Dashboard
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # weekly Monday 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build metrics
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sinceDays = Number(process.env.SINCE_DAYS || 30);
+            const since = new Date(Date.now() - sinceDays*24*60*60*1000).toISOString();
+            const commits = await github.rest.repos.listCommits({ owner, repo, since, per_page: 100 });
+            const contributors = new Map();
+            for (const c of commits.data) {
+              const login = c.author?.login || c.commit?.author?.name || 'unknown';
+              contributors.set(login, (contributors.get(login) || 0) + 1);
+            }
+            const workflows = await github.rest.actions.listWorkflowRunsForRepo({ owner, repo, per_page: 100 });
+            const runs = workflows.data.workflow_runs || [];
+            const ciRuns = runs.filter(r => ['CI','Android Build'].includes(r.name));
+            const total = ciRuns.length;
+            const failures = ciRuns.filter(r => r.conclusion === 'failure').length;
+            const successRate = total ? Math.round((1 - failures/total) * 100) : 0;
+            const issues = await github.rest.issues.listForRepo({ owner, repo, state: 'open', per_page: 100 });
+            const now = new Date();
+            const ages = issues.data.map(i => (now - new Date(i.created_at)) / (24*60*60*1000));
+            const avgIssueAge = ages.length ? (ages.reduce((a,b)=>a+b,0) / ages.length).toFixed(1) : '0.0';
+            const lines = [];
+            lines.push(`# Repository Metrics (last ${sinceDays} days)`);
+            lines.push('');
+            lines.push(`- Commit count: ${commits.data.length}`);
+            lines.push(`- Contributors: ${contributors.size}`);
+            lines.push(`- Build/Test success rate: ${successRate}% (CI & Android Build)`);
+            lines.push(`- Open issues: ${issues.data.length}`);
+            lines.push(`- Average open issue age: ${avgIssueAge} days`);
+            lines.push('');
+            lines.push('## Contributor activity');
+            for (const [login, count] of [...contributors.entries()].sort((a,b)=>b[1]-a[1])) {
+              lines.push(`- ${login}: ${count} commits`);
+            }
+            const fs = require('fs');
+            const path = 'docs/metrics.md';
+            fs.mkdirSync('docs', { recursive: true });
+            fs.writeFileSync(path, lines.join('\n'));
+      - name: Commit metrics
+        run: |
+          if git diff --quiet -- docs/metrics.md; then
+            echo "No metrics changes; skipping commit."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add docs/metrics.md
+            git commit -m "docs: update metrics dashboard"
+            git push
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
