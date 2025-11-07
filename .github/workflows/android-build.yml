@@ -2,9 +2,9 @@ name: Android Build
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, app2-sync ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, app2-sync ]
   workflow_dispatch:
 
 permissions:
