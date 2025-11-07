@@ -1,4 +1,4 @@
-# Internet Access Miracle
+# Dex Explorer
 
 [![Android Build](https://github.com/applesaucetoaboss/app/actions/workflows/android-build.yml/badge.svg?branch=main)](https://github.com/applesaucetoaboss/app/actions/workflows/android-build.yml)
 
