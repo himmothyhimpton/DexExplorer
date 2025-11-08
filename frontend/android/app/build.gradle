@@ -7,6 +7,12 @@ android {
     def envOrProp = { String name, String defaultValue = null ->
         return System.getenv(name) ?: (project.hasProperty(name) ? project.property(name) : defaultValue)
     }
+    // Load keystore.properties if present at project root (frontend/android/keystore.properties)
+    def keystoreProperties = new Properties()
+    def keystorePropsFile = rootProject.file('keystore.properties')
+    if (keystorePropsFile.exists()) {
+        keystoreProperties.load(new FileInputStream(keystorePropsFile))
+    }
     defaultConfig {
         applicationId "com.dexaudit.app"
         minSdkVersion rootProject.ext.minSdkVersion
@@ -21,14 +27,19 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
-    // Conditionally configure release signing using environment variables or Gradle properties.
-    if (envOrProp('ANDROID_KEYSTORE_PATH') != null && file(envOrProp('ANDROID_KEYSTORE_PATH')).exists()) {
+    // Configure release signing using keystore.properties if available, otherwise env/project properties
+    def ksPath = keystoreProperties['storeFile'] ?: envOrProp('ANDROID_KEYSTORE_PATH')
+    def ksStorePassword = keystoreProperties['storePassword'] ?: envOrProp('ANDROID_KEYSTORE_PASSWORD')
+    def ksKeyAlias = keystoreProperties['keyAlias'] ?: envOrProp('ANDROID_KEY_ALIAS')
+    def ksKeyPassword = keystoreProperties['keyPassword'] ?: envOrProp('ANDROID_KEY_ALIAS_PASSWORD')
+
+    if (ksPath != null && file(ksPath).exists()) {
         signingConfigs {
             release {
-                storeFile file(envOrProp('ANDROID_KEYSTORE_PATH'))
-                storePassword envOrProp('ANDROID_KEYSTORE_PASSWORD')
-                keyAlias envOrProp('ANDROID_KEY_ALIAS')
-                keyPassword envOrProp('ANDROID_KEY_ALIAS_PASSWORD')
+                storeFile file(ksPath)
+                storePassword ksStorePassword
+                keyAlias ksKeyAlias
+                keyPassword ksKeyPassword
             }
         }
     }
@@ -36,7 +47,7 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            if (envOrProp('ANDROID_KEYSTORE_PATH') != null && file(envOrProp('ANDROID_KEYSTORE_PATH')).exists()) {
+            if (signingConfigs.findByName('release')) {
                 signingConfig signingConfigs.release
             }
         }
