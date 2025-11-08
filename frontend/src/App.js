@@ -1,15 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import '@/App.css';
 import { http } from '@/lib/http';
-import { API_BASE, resolveBackendUrl } from '@/lib/apiBase';
+import { getApiBase, saveBackendOverride, clearBackendOverride, resolveBackendUrl } from '@/lib/apiBase';
 import { Capacitor, CapacitorHttp } from '@capacitor/core';
-import { Wifi, Zap, Globe, Lock, Activity, Satellite, Radio, Network, Info, ChevronLeft, ChevronRight, RotateCcw, Home as HomeIcon } from 'lucide-react';
+import { Wifi, Zap, Globe, Lock, Activity, Satellite, Radio, Network, Info, Settings, ChevronLeft, ChevronRight, RotateCcw, Home as HomeIcon } from 'lucide-react';
 import { ensureRewardGate } from '@/lib/adGate';
 import { initAdMob, showBanner, hideBanner, showNativeAdvanced } from '@/lib/admob';
 import { retry } from '@/lib/retry';
 import LightningOverlay from '@/components/LightningOverlay';
 
-const API = API_BASE;
+// API base is derived at runtime via getApiBase() with optional user override
 
 // Memoized iframe to keep resource loads alive across parent re-renders
 const BrowserFrame = React.memo(({ content, url }) => {
@@ -68,6 +68,10 @@ function App() {
   const [testedMap, setTestedMap] = useState({});
   const [showLegend, setShowLegend] = useState(false);
   const [incognito, setIncognito] = useState(false);
+  // Runtime API base and Settings overlay state
+  const [apiBase, setApiBase] = useState(() => getApiBase());
+  const [showSettings, setShowSettings] = useState(false);
+  const [backendInput, setBackendInput] = useState(() => resolveBackendUrl());
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [urlHistory, setUrlHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -192,7 +196,7 @@ function App() {
     try {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
       // Avoid premature aborts; allow the backend a bit longer in dev
-      const response = await http.get(`${API}/status`, { timeout, signal });
+      const response = await http.get(`${apiBase}/status`, { timeout, signal });
       const data = response.data;
       setStats({
         active: data.active_connections,
@@ -224,7 +228,7 @@ function App() {
     setStatus('discovering');
     try {
       const response = await retry(
-        () => http.get(`${API}/discover`, { timeout: 12000 }),
+        () => http.get(`${apiBase}/discover`, { timeout: 12000 }),
         { retries: 1, delay: 700 }
       );
       setConnections(response.data);
@@ -253,7 +257,7 @@ function App() {
     const { signal, timeout = 10000, retryDelay = 500 } = opts || {};
     try {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-      const res = await retry(() => http.get(`${API}/diagnostics/summary`, { timeout, signal }), { retries: 1, delay: retryDelay });
+      const res = await retry(() => http.get(`${apiBase}/diagnostics/summary`, { timeout, signal }), { retries: 1, delay: retryDelay });
       const data = res.data || {};
       setSummary(data);
       // Build a quick lookup map by endpoint for latency and success flags
@@ -291,7 +295,7 @@ function App() {
       }
       // Pull diagnostics first (includes discovery internally) to reduce duplicate calls
       try {
-        const res = await retry(() => http.get(`${API}/diagnostics/summary`, { timeout: 12000 }), { retries: 1, delay: 600 });
+        const res = await retry(() => http.get(`${apiBase}/diagnostics/summary`, { timeout: 12000 }), { retries: 1, delay: 600 });
         const data = res.data || {};
         setSummary(data);
         const map = {};
@@ -306,7 +310,7 @@ function App() {
       }
       
       // Then auto-connect to best one
-      const response = await retry(() => http.post(`${API}/connect`, null, { timeout: 15000 }), { retries: 1, delay: 1000 });
+      const response = await retry(() => http.post(`${apiBase}/connect`, null, { timeout: 15000 }), { retries: 1, delay: 1000 });
       
       if (response.data.success || response.data.connection) {
         setConnected(true);
@@ -424,7 +428,7 @@ function App() {
     try {
       const headRes = await retry(
         () => http.post(
-          `${API}/proxy`,
+          `${apiBase}/proxy`,
           { url: urlToLoad, method: 'HEAD', headers: { 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' } },
           { timeout: 7000 }
         ),
@@ -459,7 +463,7 @@ function App() {
       // Read raw text to avoid implicit JSON.parse throwing on HTML responses
       const response = await retry(
         () => http.post(
-          `${API}/proxy`,
+          `${apiBase}/proxy`,
           { url: urlToLoad, method: 'GET' },
           {
             timeout: 12000,
@@ -637,7 +641,7 @@ function App() {
     setWebrtcLeaks([]);
     try {
       const [res, leaks] = await Promise.all([
-        http.get(`${API}/privacy/audit`, { params: { url }, timeout: 15000 }),
+        http.get(`${apiBase}/privacy/audit`, { params: { url }, timeout: 15000 }),
         checkWebRtcLeak(),
       ]);
       setAuditResult(res.data);
@@ -770,7 +774,7 @@ function App() {
     try {
       const res = await retry(
         () => http.post(
-          `${API}/proxy`,
+          `${apiBase}/proxy`,
           { url, method: 'HEAD', headers: { 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' } },
           { timeout: 10000 }
         ),
@@ -810,7 +814,7 @@ function App() {
       let discovered = [];
       try {
         const diag = await retry(
-          () => http.get(`${API}/diagnostics/summary`, { timeout: 12000, signal: connectControllerRef.current.signal }),
+          () => http.get(`${apiBase}/diagnostics/summary`, { timeout: 12000, signal: connectControllerRef.current.signal }),
           { retries: 1, delay: 600 }
         );
         const tested = diag.data?.tested || [];
@@ -827,7 +831,7 @@ function App() {
         // Fallback to explicit discovery only if diagnostics failed
         try {
           const disc = await retry(
-            () => http.get(`${API}/discover`, { timeout: 8000, signal: connectControllerRef.current.signal }),
+            () => http.get(`${apiBase}/discover`, { timeout: 8000, signal: connectControllerRef.current.signal }),
             { retries: 0 }
           );
           discovered = disc.data || [];
@@ -876,7 +880,7 @@ function App() {
 
       const endpoint = best?.conn?.endpoint || (candidates[0] && candidates[0].endpoint);
       const res = await retry(
-        () => http.post(`${API}/connect`, { endpoint }, { timeout: 15000, signal: connectControllerRef.current.signal }),
+        () => http.post(`${apiBase}/connect`, { endpoint }, { timeout: 15000, signal: connectControllerRef.current.signal }),
         { retries: 1, delay: 700 }
       );
       if (res.data?.success || res.data?.connection) {
@@ -977,7 +981,7 @@ function App() {
       // Prefer recommendation endpoint if available; else fall back to mode selection
       const endpoint = summary?.recommendation?.endpoint;
       if (endpoint) {
-        const res = await retry(() => http.post(`${API}/connect`, { endpoint }, { timeout: 15000 }), { retries: 1, delay: 700 });
+        const res = await retry(() => http.post(`${apiBase}/connect`, { endpoint }, { timeout: 15000 }), { retries: 1, delay: 700 });
         if (res.data?.success || res.data?.connection) {
           setConnected(true);
           setActiveConnection(res.data.connection);
@@ -1067,6 +1071,59 @@ function App() {
       </div>
 
       <div className="relative z-10">
+        {/* Settings Overlay */}
+        {showSettings && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="w-full max-w-lg bg-slate-900 border border-white/10 rounded-xl shadow-xl">
+              <div className="p-4 border-b border-white/10 flex items-center justify-between">
+                <h3 className="text-lg font-semibold">Settings</h3>
+                <button className="text-sm text-gray-300 hover:text-white" onClick={() => setShowSettings(false)}>Close</button>
+              </div>
+              <div className="p-4 space-y-3">
+                <div>
+                  <div className="text-sm text-gray-300 mb-1">Backend URL (without /api)</div>
+                  <input
+                    type="text"
+                    value={backendInput}
+                    onChange={(e) => setBackendInput(e.target.value)}
+                    placeholder="http://localhost:8000"
+                    className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded focus:outline-none focus:border-gray-400"
+                  />
+                  <div className="text-xs text-gray-400 mt-1">Example: http://10.0.2.2:8000 (Android emulator) or http://localhost:8000</div>
+                </div>
+                <div className="text-xs text-gray-300">Current API base: <span className="font-mono">{apiBase}</span></div>
+                <div className="text-xs text-gray-300">Resolved base: <span className="font-mono">{resolveBackendUrl()}</span></div>
+              </div>
+              <div className="p-4 border-t border-white/10 flex items-center justify-end gap-2">
+                <button
+                  className="px-3 py-2 text-xs bg-gray-700 hover:bg-gray-600 rounded"
+                  onClick={() => setShowSettings(false)}
+                >Cancel</button>
+                <button
+                  className="px-3 py-2 text-xs bg-amber-600 hover:bg-amber-700 rounded"
+                  onClick={() => {
+                    try {
+                      const next = saveBackendOverride(backendInput);
+                      setApiBase(next);
+                      setShowSettings(false);
+                    } catch (e) {
+                      alert(e?.message || 'Invalid URL');
+                    }
+                  }}
+                >Save</button>
+                <button
+                  className="px-3 py-2 text-xs bg-blue-600 hover:bg-blue-700 rounded"
+                  onClick={() => {
+                    const next = clearBackendOverride();
+                    setApiBase(next);
+                    setBackendInput(resolveBackendUrl());
+                    setShowSettings(false);
+                  }}
+                >Clear Override</button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* Header */}
         <header className="p-6 border-b border-white/10 backdrop-blur-sm">
           <div className="max-w-7xl mx-auto flex items-center justify-between">
@@ -1078,6 +1135,10 @@ function App() {
               <div className="flex items-center gap-2">
                 <Activity className={`w-5 h-5 ${(connected && isOnline) ? 'text-emerald-400 animate-pulse' : 'text-gray-500'}`} />
                 <span className="text-sm">{!isOnline ? 'OFFLINE' : (connected ? 'ONLINE' : 'OFFLINE')}</span>
+              </div>
+              <div className="hidden md:flex items-center gap-2 px-3 py-1 rounded-full bg-white/10">
+                <span className="text-xs font-medium">API:</span>
+                <span title={apiBase} className="text-[11px] max-w-[220px] truncate">{apiBase}</span>
               </div>
               <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-white/10">
                 <span className="text-xs font-medium">Mode:</span>
@@ -1095,6 +1156,14 @@ function App() {
                   <span className="text-xs font-medium">• Strength: {speedLabel(activeConnection.latency)}</span>
                 </div>
               )}
+              <button
+                className="px-3 py-1 text-xs bg-white/10 hover:bg-white/20 rounded flex items-center gap-2"
+                onClick={() => setShowSettings(true)}
+                aria-label="Settings"
+              >
+                <Settings className="w-4 h-4" />
+                Settings
+              </button>
             </div>
           </div>
         </header>
@@ -1412,7 +1481,7 @@ function App() {
                           if (!unlocked) { setStatus('failed'); return; }
                           try {
                             setStatus('connecting');
-                            const res = await http.post(`${API}/connect`, { endpoint: conn.endpoint });
+                            const res = await http.post(`${apiBase}/connect`, { endpoint: conn.endpoint });
                             if (res.data?.success) {
                               setConnected(true);
                               setActiveConnection(res.data.connection);
