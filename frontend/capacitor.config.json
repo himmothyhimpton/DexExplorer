@@ -1,6 +1,6 @@
 {
-  "appId": "com.fluxcapacitor.app",
-  "appName": "Flux Capacitor",
+  "appId": "com.dexaudit.app",
+  "appName": "Dex Audit",
   "webDir": "build",
   "bundledWebRuntime": false,
   "server": {

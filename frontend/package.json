@@ -1,7 +1,8 @@
 {
-  "name": "frontend",
+  "name": "dex-audit",
   "version": "0.1.0",
   "private": true,
+  "description": "Dex Audit — Privacy audit & leak test (React + Capacitor)",
   "dependencies": {
     "@capacitor-community/admob": "6",
     "@capacitor/core": "^6.0.0",

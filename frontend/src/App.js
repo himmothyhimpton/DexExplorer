@@ -71,6 +71,19 @@ function App() {
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [urlHistory, setUrlHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
+  const [auditUrl, setAuditUrl] = useState('');
+  const [auditResult, setAuditResult] = useState(null);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState(null);
+  const [webrtcLeaks, setWebrtcLeaks] = useState([]);
+  const [auditHistory, setAuditHistory] = useState(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem('privacy_audit_history') : null;
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
 
   // Browser-first: require user to choose mode before showing browser
   const [browseMode, setBrowseMode] = useState(() => {
@@ -128,14 +141,34 @@ function App() {
     setIncognito(false);
   }, [browseMode]);
 
-  // Check backend status once on load; poll only when connected
+  // Check backend status once on load; debounce and cancel on HMR
   useEffect(() => {
-    checkStatus();
+    const controller = new AbortController();
+    statusControllerRef.current = controller;
+    const t = setTimeout(() => {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      checkStatus({ signal: controller.signal, timeout: 12000 });
+    }, process.env.NODE_ENV === 'development' ? 350 : 0);
+    return () => {
+      clearTimeout(t);
+      try { controller.abort(); } catch {}
+      statusControllerRef.current = null;
+    };
   }, []);
 
-  // Pull diagnostics summary early so compact card has data
+  // Pull diagnostics summary early; debounce and cancel on HMR
   useEffect(() => {
-    loadSummary();
+    const controller = new AbortController();
+    summaryControllerRef.current = controller;
+    const t = setTimeout(() => {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      loadSummary({ signal: controller.signal, timeout: 12000, retryDelay: process.env.NODE_ENV === 'development' ? 600 : 500 });
+    }, process.env.NODE_ENV === 'development' ? 350 : 0);
+    return () => {
+      clearTimeout(t);
+      try { controller.abort(); } catch {}
+      summaryControllerRef.current = null;
+    };
   }, []);
 
   // Initialize AdMob and place ads on home
@@ -154,10 +187,12 @@ function App() {
     return () => clearInterval(interval);
   }, [connected]);
 
-  const checkStatus = async () => {
+  const checkStatus = async (opts = {}) => {
+    const { signal, timeout = 10000 } = opts || {};
     try {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
       // Avoid premature aborts; allow the backend a bit longer in dev
-      const response = await http.get(`${API}/status`, { timeout: 10000 });
+      const response = await http.get(`${API}/status`, { timeout, signal });
       const data = response.data;
       setStats({
         active: data.active_connections,
@@ -168,9 +203,19 @@ function App() {
         setActiveConnection(data.connections[0]);
       }
     } catch (error) {
-      // Fail quietly when backend is down to avoid noisy repeated errors
+      const emsg = error?.message || '';
+      // Treat cancellations/aborts as benign in dev
+      if (error?.name === 'CanceledError' || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED' || /aborted|canceled/i.test(emsg)) {
+        if (process.env.NODE_ENV === 'development') {
+          console.debug('Status check aborted');
+        }
+        return;
+      }
+      // Fail quietly in dev; surface in production
       if (process.env.NODE_ENV === 'development') {
         console.debug('Status check failed:', error?.message || error);
+      } else {
+        console.error('Status check failed:', error);
       }
     }
   };
@@ -204,9 +249,11 @@ function App() {
     }
   };
 
-  const loadSummary = async () => {
+  const loadSummary = async (opts = {}) => {
+    const { signal, timeout = 10000, retryDelay = 500 } = opts || {};
     try {
-      const res = await retry(() => http.get(`${API}/diagnostics/summary`, { timeout: 10000 }), { retries: 1, delay: 500 });
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      const res = await retry(() => http.get(`${API}/diagnostics/summary`, { timeout, signal }), { retries: 1, delay: retryDelay });
       const data = res.data || {};
       setSummary(data);
       // Build a quick lookup map by endpoint for latency and success flags
@@ -218,8 +265,17 @@ function App() {
       });
       setTestedMap(map);
     } catch (e) {
+      const emsg = e?.message || '';
+      if (e?.name === 'CanceledError' || e?.name === 'AbortError' || e?.code === 'ERR_CANCELED' || /aborted|canceled/i.test(emsg)) {
+        if (process.env.NODE_ENV === 'development') {
+          console.debug('Summary fetch aborted');
+        }
+        return;
+      }
       if (process.env.NODE_ENV === 'development') {
         console.debug('Summary fetch failed:', e?.message || e);
+      } else {
+        console.error('Summary fetch failed:', e);
       }
     }
   };
@@ -285,6 +341,8 @@ function App() {
   // Controllers to cancel in-flight requests to avoid noisy aborts
   const pageControllerRef = useRef(null);
   const connectControllerRef = useRef(null);
+  const statusControllerRef = useRef(null);
+  const summaryControllerRef = useRef(null);
 
   // Simple URL history helpers for overlay toolbar
   const addToHistory = (url) => {
@@ -338,7 +396,13 @@ function App() {
       const urlLower = (urlOverride || browserUrl || '').toLowerCase();
       if (urlLower.includes('.onion')) {
         setStatus('failed');
-        setBrowserContent('<div class="p-4 text-amber-700">Tor route required to load .onion links. Connect to a Tor source, then try again.</div>');
+        try {
+          const { resolveBackendUrl } = await import('./lib/apiBase.js');
+          const guideUrl = `${resolveBackendUrl()}/orbot-setup`;
+          setBrowserContent(`<div class="p-4 text-amber-700">Tor route required to load .onion links. Connect to a Tor source, then try again. <a href="${guideUrl}" target="_blank" rel="noopener" class="underline">Orbot setup guide</a></div>`);
+        } catch(e) {
+          setBrowserContent('<div class="p-4 text-amber-700">Tor route required to load .onion links. Connect to a Tor source, then try again.</div>');
+        }
         setShowBrowser(true);
         return;
       }
@@ -490,6 +554,100 @@ function App() {
       setBrowserContent(`<div class="p-4 text-red-700">${msg}</div>`);
       setShowBrowser(true);
       setStatus('error');
+    }
+  };
+
+  // Privacy helpers
+  const normalizeUrl = (u) => {
+    if (!u) return '';
+    const trimmed = String(u).trim();
+    if (!/^https?:\/\//i.test(trimmed)) return `https://${trimmed}`;
+    return trimmed;
+  };
+
+  const persistHistory = (url) => {
+    if (!url) return;
+    const next = [url, ...auditHistory.filter((u) => u !== url)].slice(0, 5);
+    setAuditHistory(next);
+    try {
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('privacy_audit_history', JSON.stringify(next));
+      }
+    } catch {}
+  };
+
+  const checkWebRtcLeak = async () => {
+    try {
+      const rtc = new RTCPeerConnection({ iceServers: [] });
+      rtc.createDataChannel('check');
+      const offer = await rtc.createOffer();
+      await rtc.setLocalDescription(offer);
+      const ips = new Set();
+      return await new Promise((resolve) => {
+        const timeout = setTimeout(() => { try { rtc.close(); } catch {} resolve(Array.from(ips)); }, 4000);
+        rtc.onicecandidate = (ev) => {
+          if (ev && ev.candidate && ev.candidate.candidate) {
+            const cand = ev.candidate.candidate;
+            const m = cand.match(/(\b(?:\d{1,3}\.){3}\d{1,3}\b|[a-fA-F0-9:]{2,})/);
+            if (m && m[1]) ips.add(m[1]);
+          } else {
+            clearTimeout(timeout);
+            try { rtc.close(); } catch {}
+            resolve(Array.from(ips));
+          }
+        };
+      });
+    } catch {
+      return [];
+    }
+  };
+
+  const missingHeaderRecommendations = (headers) => {
+    const h = Object.fromEntries(Object.entries(headers || {}).map(([k, v]) => [String(k).toLowerCase(), v]));
+    const recs = [];
+    if (!h['strict-transport-security']) {
+      recs.push('Add HSTS: strict-transport-security: max-age=31536000; includeSubDomains; preload');
+    }
+    if (!h['content-security-policy']) {
+      recs.push("Add CSP: content-security-policy with 'default-src' and 'frame-ancestors'");
+    }
+    if (!h['referrer-policy']) {
+      recs.push('Add Referrer-Policy: no-referrer or same-origin');
+    }
+    if (!h['permissions-policy']) {
+      recs.push('Add Permissions-Policy: disable camera, microphone, geolocation by default');
+    }
+    if (!h['x-frame-options'] && !h['content-security-policy']) {
+      recs.push('Add X-Frame-Options: DENY (or CSP frame-ancestors)');
+    }
+    if (!h['x-content-type-options']) {
+      recs.push('Add X-Content-Type-Options: nosniff');
+    }
+    return recs;
+  };
+
+  // Privacy Audit runner
+  const runPrivacyAudit = async (target = null) => {
+    const raw = target ?? auditUrl;
+    if (!raw || typeof raw !== 'string') return;
+    const url = normalizeUrl(raw);
+    setAuditLoading(true);
+    setAuditError(null);
+    setAuditResult(null);
+    setWebrtcLeaks([]);
+    try {
+      const [res, leaks] = await Promise.all([
+        http.get(`${API}/privacy/audit`, { params: { url }, timeout: 15000 }),
+        checkWebRtcLeak(),
+      ]);
+      setAuditResult(res.data);
+      setWebrtcLeaks(leaks);
+      persistHistory(url);
+    } catch (e) {
+      const msg = e?.response?.data?.error || e?.message || 'Audit failed';
+      setAuditError(msg);
+    } finally {
+      setAuditLoading(false);
     }
   };
 
@@ -839,7 +997,7 @@ function App() {
           <div className="max-w-7xl mx-auto flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Zap className={`w-8 h-8 ${getStatusColor()} transition-colors duration-300`} />
-              <h1 className="text-2xl font-bold text-white">Dex Explorer</h1>
+              <h1 className="text-2xl font-bold text-white">Dex Audit</h1>
             </div>
             <div className="flex items-center gap-6">
               <div className="flex items-center gap-2">
@@ -1021,7 +1179,7 @@ function App() {
 
                 {browseMode === 'dark' && connected && activeConnection?.type !== 'tor' && (
                   <div className="mb-4 text-sm text-amber-300">
-                    Tor route not active. .onion links will not load. Choose a Tor source below.
+        Tor route not active. .onion links will not load. Choose a Tor source below. <a href={`${resolveBackendUrl()}/orbot-setup`} target="_blank" rel="noopener" className="underline">Orbot setup guide</a>
                   </div>
                 )}
 
@@ -1085,9 +1243,9 @@ function App() {
             </div>
           )}
 
-          {/* Diagnostics Summary */}
-          {Object.keys(summary.counts_by_type || {}).length > 0 && (
-            <div className="mb-8 p-6 bg-white/5 backdrop-blur-sm rounded-2xl border border-white/10">
+        {/* Diagnostics Summary */}
+        {Object.keys(summary.counts_by_type || {}).length > 0 && (
+          <div className="mb-8 p-6 bg-white/5 backdrop-blur-sm rounded-2xl border border-white/10">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-semibold flex items-center gap-2">
                   <Activity className="w-5 h-5 text-blue-400" />
@@ -1123,8 +1281,104 @@ function App() {
                     Latency: {summary.recommendation.latency ? `${Math.round(summary.recommendation.latency)}ms` : 'Unknown'}
                     {' '}• Speed: {speedLabel(summary.recommendation.latency)}
                   </div>
+          </div>
+        )}
+
+        {/* Privacy Audit */}
+        <div className="mb-8 p-6 bg-white/5 backdrop-blur-sm rounded-2xl border border-white/10">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold flex items-center gap-2">
+              <Lock className="w-5 h-5 text-purple-400" />
+              Privacy Audit
+            </h3>
+            <button
+              onClick={() => runPrivacyAudit()}
+              disabled={auditLoading}
+              className={`px-3 py-2 text-sm rounded-lg ${auditLoading ? 'bg-purple-400 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700'}`}
+            >{auditLoading ? 'Running…' : 'Run'}</button>
+          </div>
+          <div className="flex gap-2 mb-3">
+            <input
+              type="text"
+              value={auditUrl}
+              onChange={(e) => setAuditUrl(e.target.value)}
+              placeholder="Enter site URL (https://example.com)"
+              className="min-w-0 flex-1 px-4 py-3 bg-white/10 border border-white/20 rounded-lg focus:outline-none focus:border-gray-400"
+            />
+            <button
+              onClick={() => runPrivacyAudit(auditUrl)}
+              disabled={auditLoading || !auditUrl}
+              className={`px-3 py-2 text-sm rounded-lg ${auditLoading || !auditUrl ? 'bg-gray-600 cursor-not-allowed' : 'bg-gray-700 hover:bg-gray-600'}`}
+            >Audit</button>
+          </div>
+          {auditHistory.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-4">
+              {auditHistory.map((u) => (
+                <button key={u} onClick={() => { setAuditUrl(u); runPrivacyAudit(u); }} className="text-xs px-2 py-1 rounded bg-white/10 border border-white/10 hover:bg-white/20">{u}</button>
+              ))}
+            </div>
+          )}
+          {auditError && (
+            <div className="text-amber-300 text-sm mb-2">{auditError}</div>
+          )}
+          {auditLoading && (
+            <div className="text-sm text-gray-300">Testing headers and WebRTC…</div>
+          )}
+          {auditResult && !auditError && (
+            <div className="text-sm text-gray-300 space-y-3">
+              <div className="flex items-center gap-3">
+                <span className="font-semibold">Grade:</span>
+                <span className="px-2 py-1 rounded bg-white/10 border border-white/10">{auditResult.grade || 'N/A'}</span>
+                <span className="font-semibold ml-4">Onion-Location:</span>
+                <span className="px-2 py-1 rounded bg-white/10 border border-white/10">{auditResult.result?.onion_location || 'None'}</span>
+                <span className="font-semibold ml-4">Tor Available:</span>
+                <span className="px-2 py-1 rounded bg-white/10 border border-white/10">{auditResult.tor_compare?.available ? 'Yes' : 'No'}</span>
+              </div>
+              <div>
+                <div className="font-semibold mb-1">Header Signals</div>
+                <div className="flex flex-wrap gap-2">
+                  {(() => {
+                    const hdrs = auditResult.result?.headers || {};
+                    const lower = Object.fromEntries(Object.entries(hdrs).map(([k, v]) => [String(k).toLowerCase(), v]));
+                    const keys = ['strict-transport-security','content-security-policy','referrer-policy','permissions-policy','x-frame-options','x-content-type-options'];
+                    return keys.map((key) => {
+                      const present = !!lower[key];
+                      return (
+                        <span key={key} className={`text-xs px-2 py-1 rounded border ${present ? 'bg-green-600/20 border-green-500/40' : 'bg-red-600/20 border-red-500/40'}`}>
+                          {key}: {present ? 'present' : 'missing'}
+                        </span>
+                      );
+                    });
+                  })()}
                 </div>
-              )}
+              </div>
+              {(() => {
+                const hdrs = auditResult.result?.headers || {};
+                const recs = missingHeaderRecommendations(hdrs);
+                return recs.length > 0 ? (
+                  <div>
+                    <div className="font-semibold mb-1">Recommended Actions</div>
+                    <ul className="list-disc ml-5 space-y-1">
+                      {recs.map((r, i) => (<li key={i}>{r}</li>))}
+                    </ul>
+                  </div>
+                ) : null;
+              })()}
+              <div>
+                <div className="font-semibold mb-1">WebRTC IPs Observed</div>
+                {webrtcLeaks && webrtcLeaks.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {webrtcLeaks.map((ip) => (
+                      <span key={ip} className="text-xs px-2 py-1 rounded bg-white/10 border border-white/10">{ip}</span>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-gray-400">No local IPs observed or WebRTC disabled.</div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
             </div>
           )}
 

@@ -12,6 +12,8 @@ import uuid
 from datetime import datetime, timezone
 import asyncio
 import aiohttp
+import re
+from urllib.parse import urlparse
 try:
     # Optional socks support for Tor/I2P routes
     from aiohttp_socks import ProxyConnector  # type: ignore
@@ -506,6 +508,162 @@ async def diagnostics_summary():
         "recommendation": recommendation,
         "message": "Use /api/connect to activate the recommended route"
     }
+
+# --- Privacy & Tor endpoints ---
+
+def _parse_security_headers(headers: Dict[str, str]) -> Dict[str, Any]:
+    h = {k.lower(): v for k, v in (headers or {}).items()}
+    hsts = 'strict-transport-security' in h
+    csp = 'content-security-policy' in h
+    referrer = 'referrer-policy' in h
+    permissions = 'permissions-policy' in h
+    xfo = 'x-frame-options' in h
+    # Check cookie security flags in Set-Cookie
+    set_cookie = h.get('set-cookie', '')
+    cookies = [c.strip() for c in set_cookie.split('\n') if c.strip()] if set_cookie else []
+    cookie_secure = True
+    for c in cookies:
+        # If any cookie lacks Secure flag, mark as not secure
+        if not re.search(r'\bSecure\b', c, re.IGNORECASE):
+            cookie_secure = False
+            break
+    return {
+        'hsts': hsts,
+        'csp': csp,
+        'referrer_policy': referrer,
+        'permissions_policy': permissions,
+        'x_frame_options': xfo,
+        'set_cookie_secure': cookie_secure,
+    }
+
+def _grade_privacy(signals: Dict[str, Any]) -> str:
+    score = 0
+    if signals.get('https_only'): score += 1
+    if signals.get('headers', {}).get('hsts'): score += 1
+    if signals.get('headers', {}).get('csp'): score += 1
+    if signals.get('headers', {}).get('referrer_policy'): score += 1
+    if signals.get('headers', {}).get('permissions_policy'): score += 1
+    if signals.get('headers', {}).get('x_frame_options'): score += 1
+    if signals.get('headers', {}).get('set_cookie_secure'): score += 1
+    if signals.get('onion_location'): score += 1
+    # Simple grading heuristic
+    if score >= 6:
+        return 'A'
+    if score >= 4:
+        return 'B'
+    return 'C'
+
+async def _fetch_headers(url: str, connector: Optional[Any] = None, allow_redirects: bool = True) -> Dict[str, Any]:
+    ssl_param = False if tls_disabled() else None
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            try:
+                async with session.head(url, timeout=timeout, ssl=ssl_param, allow_redirects=allow_redirects) as resp:
+                    final_url = str(resp.url)
+                    return {
+                        'status': resp.status,
+                        'headers': dict(resp.headers),
+                        'final_url': final_url,
+                        'redirects': len(getattr(resp, 'history', []) or []),
+                    }
+            except Exception:
+                # Fallback to small GET when HEAD is blocked
+                async with session.get(url, timeout=timeout, ssl=ssl_param, allow_redirects=allow_redirects) as resp:
+                    final_url = str(resp.url)
+                    return {
+                        'status': resp.status,
+                        'headers': dict(resp.headers),
+                        'final_url': final_url,
+                        'redirects': len(getattr(resp, 'history', []) or []),
+                    }
+    except Exception as e:
+        return {'error': str(e)}
+
+@api_router.get('/privacy/audit')
+async def privacy_audit(request: Request):
+    """Evaluate basic privacy posture of a target URL without rendering content.
+    Checks transport and common security headers; detects Onion-Location header if present.
+    Optionally compares with Tor when available.
+    """
+    try:
+        params = dict(request.query_params)
+        raw_url = (params.get('url') or '').strip()
+        if not raw_url:
+            raise HTTPException(status_code=400, detail='Missing url')
+        parsed = urlparse(raw_url)
+        if parsed.scheme not in ('http', 'https'):
+            raise HTTPException(status_code=400, detail='URL must use http or https')
+        # Direct fetch
+        direct = await _fetch_headers(raw_url)
+        if 'error' in direct:
+            raise HTTPException(status_code=502, detail=f"Fetch failed: {direct['error']}")
+        direct_headers = _parse_security_headers(direct.get('headers', {}))
+        direct_signals = {
+            'https_only': (urlparse(direct.get('final_url') or raw_url).scheme == 'https'),
+            'redirects': direct.get('redirects', 0),
+            'headers': direct_headers,
+            'onion_location': (direct.get('headers', {}) or {}).get('Onion-Location') or (direct.get('headers', {}) or {}).get('onion-location')
+        }
+        grade = _grade_privacy(direct_signals)
+
+        # Optional Tor comparison if SOCKS proxy is reachable
+        tor_available = await check_tor_availability()
+        tor_compare: Dict[str, Any] = {'available': tor_available}
+        if tor_available and ProxyConnector:
+            try:
+                connector = ProxyConnector.from_url('socks5://127.0.0.1:9050')
+            except Exception:
+                connector = None
+            if connector:
+                tor = await _fetch_headers(raw_url, connector=connector)
+                if 'error' not in tor:
+                    tor_headers = _parse_security_headers(tor.get('headers', {}))
+                    tor_compare.update({
+                        'final_url': tor.get('final_url'),
+                        'redirects': tor.get('redirects', 0),
+                        'headers': tor_headers,
+                        'onion_location': (tor.get('headers', {}) or {}).get('Onion-Location') or (tor.get('headers', {}) or {}).get('onion-location')
+                    })
+                else:
+                    tor_compare['error'] = tor.get('error')
+
+        return {
+            'url': raw_url,
+            'result': direct_signals,
+            'grade': grade,
+            'tor_compare': tor_compare,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get('/tor/check')
+async def tor_check():
+    """Verify Tor SOCKS availability and current Tor status via Tor Project's API."""
+    available = await check_tor_availability()
+    data: Dict[str, Any] = {'tor_available': available}
+    if available and ProxyConnector:
+        try:
+            connector = ProxyConnector.from_url('socks5://127.0.0.1:9050')
+        except Exception:
+            connector = None
+        try:
+            async with aiohttp.ClientSession(connector=connector) as session:
+                timeout = aiohttp.ClientTimeout(total=8)
+                ssl_param = False if tls_disabled() else None
+                async with session.get('https://check.torproject.org/api/ip', timeout=timeout, ssl=ssl_param) as resp:
+                    if resp.status == 200:
+                        j = await resp.json()
+                        data.update({'via_tor': True, 'is_tor': bool(j.get('IsTor')), 'ip': j.get('IP')})
+                    else:
+                        data.update({'via_tor': True, 'error': f'status {resp.status}'})
+        except Exception as e:
+            data.update({'via_tor': True, 'error': str(e)})
+    else:
+        data.update({'via_tor': False})
+    return data
 
 # --- Lightweight auxiliary API endpoints to satisfy frontend plugins ---
 
@@ -1035,6 +1193,69 @@ async def privacy():
           </p>
 
           <p class=\"muted\">Last updated: 2025-11-05</p>
+        </div>
+      </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+# Orbot setup guide (serves a simple HTML page for Android/web dev)
+@app.get("/orbot-setup", response_class=HTMLResponse)
+async def orbot_setup():
+    try:
+        # Prefer the docs file when available
+        docs_path = ROOT_DIR.parent / 'docs' / 'orbot-setup.html'
+        if docs_path.exists():
+            return HTMLResponse(content=docs_path.read_text(encoding='utf-8'))
+    except Exception:
+        pass
+
+    # Fallback inline content
+    html = """
+    <!doctype html>
+    <html lang=\"en\">
+    <head>
+      <meta charset=\"utf-8\" />
+      <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+      <title>Orbot & Tor Setup (Android)</title>
+      <style>
+        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; color: #111; }
+        h1 { margin: 0 0 12px; }
+        h2 { margin-top: 20px; }
+        p { line-height: 1.6; }
+        ul { line-height: 1.6; }
+        a { color: #0ea5e9; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .muted { color: #666; }
+        .container { max-width: 820px; margin: 0 auto; }
+        .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; }
+        .warn { background: #fff7ed; border: 1px solid #fdba74; color: #9a3412; padding: 10px; border-radius: 8px; }
+      </style>
+    </head>
+    <body>
+      <div class=\"container\">
+        <h1>Orbot &amp; Tor Setup (Android)</h1>
+        <p class=\"muted\">Follow these steps to route supported app traffic through the Tor network.</p>
+        <div class=\"card\">
+          <h2>Install Orbot</h2>
+          <ul>
+            <li>Download from trusted sources: Google Play or F-Droid.</li>
+            <li>Launch Orbot and connect to Tor until status is \"Connected\".</li>
+          </ul>
+          <h2>Tor Browser</h2>
+          <ul>
+            <li>Install official Tor Browser from Google Play.</li>
+            <li>When Orbot is connected, Tor Browser routes via Tor automatically.</li>
+          </ul>
+          <h2>Other Apps</h2>
+          <ul>
+            <li>Enable Orbot VPN profile or proxy in each app's network settings.</li>
+            <li>Verify connection status inside each application.</li>
+          </ul>
+          <h2>Notes</h2>
+          <p>Orbot uses a VPN profile but is not a traditional VPN service. Use Tor Browser for privacy-critical browsing.</p>
+          <p class=\"muted\">Last updated: 2025-11-07</p>
         </div>
       </div>
     </body>

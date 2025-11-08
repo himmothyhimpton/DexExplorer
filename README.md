@@ -1,15 +1,15 @@
-# Flux Capacitor
+# Dex Audit
 
 [![Android Build](https://github.com/himmothyhimpton/flux-capacitor/actions/workflows/android-build.yml/badge.svg?branch=main)](https://github.com/himmothyhimpton/flux-capacitor/actions/workflows/android-build.yml)
 
-A React + FastAPI application for connectivity diagnostics and routing enhancements to reinforce connectivity.
+Privacy Audit & Leak Test — a React + FastAPI app that inspects site privacy headers, detects Onion-Location mirrors, checks Tor availability, and probes client WebRTC/IP exposure before you open links.
 
 ## Overview
 
 This application consists of:
-- **Backend**: FastAPI server that discovers and manages internet connection sources
-- **Frontend**: React application that provides a user interface
-- **Android App**: Mobile version providing diagnostics and connection attempts via available routes
+- **Backend**: FastAPI server providing privacy audit APIs, Tor checks, and connection discovery
+- **Frontend**: React application with a Privacy Audit card and connectivity UI
+- **Android App**: Capacitor-based mobile build with diagnostics and privacy tests
 
 ## Android Build
 
@@ -77,6 +77,19 @@ npm start
 
 ### Dark Web Mode (Ahmia Auto‑Redirect)
 - Clicking the `Dark Web` option now immediately opens the secure browser overlay and auto‑connects using Tor requirements, then loads Ahmia (`https://ahmia.fi/`) without intermediate prompts.
+
+### Orbot & Tor Setup (Android)
+- Orbot (Tor daemon) is required for `.onion` browsing and Tor‑routed connectivity.
+- Follow the guide: `docs/orbot-setup.html` locally, or run the backend and visit `http://localhost:8000/orbot-setup`.
+- Steps:
+  - Install Orbot from Google Play or F‑Droid.
+  - Launch Orbot and wait until status shows Connected.
+  - Install the official Tor Browser from Google Play; it will route via Tor automatically when Orbot is connected.
+  - For other apps (e.g., Bitwarden, Element), enable the Orbot VPN profile or set proxy in their network settings.
+- Notes:
+  - The Tor Project recommends Tor Browser for web browsing through Tor due to strong privacy protections.
+  - Orbot uses a VPN profile but is not a traditional VPN service.
+  - The app surfaces a contextual “Orbot setup guide” link when Tor is required but not active.
 - A loading indicator is shown during connection; existing rewards gate and connection safeguards remain in place.
 - Normal mode continues to use DuckDuckGo by default and supports an Incognito toggle for persistence control.
 
