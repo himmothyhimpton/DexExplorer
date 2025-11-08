@@ -1139,6 +1139,20 @@
   dependencies:
     tslib "^2.1.0"
 
+"@capacitor/core@latest":
+  version "7.4.4"
+  resolved "https://registry.npmmirror.com/@capacitor/core/-/core-7.4.4.tgz#b752dd7a12141e40d1c8ce2e37a79571d9f83518"
+  integrity sha512-xzjxpr+d2zwTpCaN0k+C6wKSZzWFAb9OVEUtmO72ihjr/NEDoLvsGl4WLfjWPcCO2zOy0b2X52tfRWjECFUjtw==
+  dependencies:
+    tslib "^2.1.0"
+
+"@capacitor/http@^0.0.2":
+  version "0.0.2"
+  resolved "https://registry.npmmirror.com/@capacitor/http/-/http-0.0.2.tgz#a5a3f29d1682662c62736aa953823b9a178e7073"
+  integrity sha512-3UPqYOmVkAQjCWWowSDGPnBkXY7znbPE7lNs8nhwTmE2E5fXTvjHM8PV15zOyn+nenY7zEu9Air49fGjrX+Tjg==
+  dependencies:
+    "@capacitor/core" latest
+
 "@craco/craco@7.1.0":
   version "7.1.0"
   resolved "https://registry.npmmirror.com/@craco/craco/-/craco-7.1.0.tgz#12bd394c7f0334e214302e4d35a1768f68042fbb"

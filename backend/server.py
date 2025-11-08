@@ -470,16 +470,33 @@ async def get_status():
 @api_router.get("/diagnostics/summary")
 async def diagnostics_summary():
     """Summarize discovered sources, quick health checks, and best route recommendation."""
-    # Discover now to ensure fresh data
-    discovered_models = await discover_connections()
-    discovered = [d.model_dump() for d in discovered_models]
+    # Discover now with a tight cap; fallback to a minimal direct route
+    try:
+        discovered_models = await asyncio.wait_for(discover_connections(), timeout=1.5)
+        discovered = [d.model_dump() for d in discovered_models]
+    except asyncio.TimeoutError:
+        discovered = [{
+            "type": "direct",
+            "name": "Direct (System)",
+            "status": "available",
+            "anonymity_level": 1,
+            "endpoint": "direct://system",
+        }]
 
-    # Quick tests for a smaller subset to keep summary responsive
-    test_tasks = [test_connection_direct(conn) for conn in discovered[:6]]
-    results = await asyncio.gather(*test_tasks, return_exceptions=True)
+    # Quick tests for a small subset and strict overall timeout to stay responsive
+    subset = discovered[:2]
+    test_tasks = [test_connection_direct(conn) for conn in subset]
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*test_tasks, return_exceptions=True),
+            timeout=2.0,
+        )
+    except asyncio.TimeoutError:
+        # If tests take too long, return partial data with conservative defaults
+        results = [{"success": False, "latency": 9999} for _ in subset]
 
     tested = []
-    for conn, res in zip(discovered[:6], results):
+    for conn, res in zip(subset, results):
         if isinstance(res, dict):
             conn = {**conn, **{"latency": res.get("latency"), "tested_success": res.get("success")}}
         tested.append(conn)
@@ -991,10 +1008,18 @@ async def test_connection_direct(conn: dict) -> dict:
 # Include the router in the main app
 app.include_router(api_router)
 
+# CORS: default to explicit dev origins when not configured, and allow credentials only when requested
+_origins_env = os.environ.get('CORS_ORIGINS')
+_origins = [o.strip() for o in _origins_env.split(',')] if _origins_env else [
+    'http://localhost:3001',
+    'http://localhost:3000',
+]
+_allow_creds = os.environ.get('CORS_ALLOW_CREDENTIALS', 'false').lower() == 'true'
+
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_credentials=_allow_creds,
+    allow_origins=_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

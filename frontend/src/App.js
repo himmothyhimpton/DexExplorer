@@ -79,6 +79,7 @@ function App() {
   const [auditResult, setAuditResult] = useState(null);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState(null);
+  const [auditErrorDetail, setAuditErrorDetail] = useState('');
   const [webrtcLeaks, setWebrtcLeaks] = useState([]);
   const [auditHistory, setAuditHistory] = useState(() => {
     try {
@@ -88,6 +89,10 @@ function App() {
       return [];
     }
   });
+
+  // Connectivity feedback: track backend reachability for clear UI messaging
+  const [backendError, setBackendError] = useState(false);
+  const [backendErrorDetail, setBackendErrorDetail] = useState('');
 
   // Browser-first: require user to choose mode before showing browser
   const [browseMode, setBrowseMode] = useState(() => {
@@ -175,6 +180,25 @@ function App() {
     };
   }, []);
 
+  // Android-only: when backend errors persist, populate a local diagnostics summary
+  useEffect(() => {
+    (async () => {
+      const platform = (Capacitor?.getPlatform?.() || 'web');
+      if (platform !== 'android' || !CapacitorHttp) return;
+      if (!backendError) return;
+      // Avoid overwriting a populated summary
+      const hasSummary = summary && ((Array.isArray(summary.tested) && summary.tested.length > 0) || summary.recommendation);
+      if (hasSummary) return;
+      try {
+        const local = await buildLocalSummary();
+        setSummary(local);
+        setTestedMap({});
+        setBackendError(false);
+        setBackendErrorDetail('');
+      } catch (_) {}
+    })();
+  }, [backendError, apiBase]);
+
   // Initialize AdMob and place ads on home
   useEffect(() => {
     (async () => {
@@ -206,6 +230,9 @@ function App() {
         setConnected(true);
         setActiveConnection(data.connections[0]);
       }
+      // Clear connectivity error on successful status check
+      setBackendError(false);
+      setBackendErrorDetail('');
     } catch (error) {
       const emsg = error?.message || '';
       // Treat cancellations/aborts as benign in dev
@@ -214,6 +241,11 @@ function App() {
           console.debug('Status check aborted');
         }
         return;
+      }
+      // Surface a clear backend connectivity error for testers
+      if (typeof navigator !== 'undefined' && navigator.onLine !== false) {
+        setBackendError(true);
+        setBackendErrorDetail(error?.message || String(error));
       }
       // Fail quietly in dev; surface in production
       if (process.env.NODE_ENV === 'development') {
@@ -268,6 +300,9 @@ function App() {
         }
       });
       setTestedMap(map);
+      // Clear backend error if summary succeeds
+      setBackendError(false);
+      setBackendErrorDetail('');
     } catch (e) {
       const emsg = e?.message || '';
       if (e?.name === 'CanceledError' || e?.name === 'AbortError' || e?.code === 'ERR_CANCELED' || /aborted|canceled/i.test(emsg)) {
@@ -275,6 +310,10 @@ function App() {
           console.debug('Summary fetch aborted');
         }
         return;
+      }
+      if (typeof navigator !== 'undefined' && navigator.onLine !== false) {
+        setBackendError(true);
+        setBackendErrorDetail(e?.message || String(e));
       }
       if (process.env.NODE_ENV === 'development') {
         console.debug('Summary fetch failed:', e?.message || e);
@@ -330,6 +369,37 @@ function App() {
           console.debug('Connection aborted');
         }
       } else {
+        // Android fallback: mark as connected using device route to keep UX smooth
+        const platform = (Capacitor?.getPlatform?.() || 'web');
+        if (platform === 'android' && CapacitorHttp) {
+          try {
+            const online = await probeConnectivity();
+            if (!online) throw new Error('Offline');
+            const latency = await measureLatency();
+            const leaks = await checkWebRtcLeak();
+            const deviceConn = {
+              type: 'direct',
+              label: 'Device network',
+              anonymity_level: leaks.length === 0 ? 2 : 1,
+              endpoint: 'device://network',
+              latency: latency || null,
+            };
+            setConnected(true);
+            setActiveConnection(deviceConn);
+            setConnections([deviceConn]);
+            setDiscoveredCount(1);
+            setSummary(await buildLocalSummary());
+            setStatus('connected');
+            // Keep the browser hidden until user chooses mode
+            setShowBrowser(false);
+            setTimeout(scrollToModeChooser, 50);
+            return;
+          } catch (fallbackErr) {
+            if (process.env.NODE_ENV === 'development') {
+              console.debug('Android device-connect fallback failed:', fallbackErr?.message || fallbackErr);
+            }
+          }
+        }
         if (process.env.NODE_ENV === 'development') {
           console.debug('Connection failed:', error?.message || error);
         } else {
@@ -569,6 +639,81 @@ function App() {
     return trimmed;
   };
 
+  // Network helpers
+  const UA = 'Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119 Mobile Safari/537.36 DexAudit/1.1';
+  const mapNetworkError = (err) => {
+    const raw = String((err && (err.message || err.error)) || '').toLowerCase();
+    if (/name_not_resolved|unknownhost|enotfound|dns|no address associated/i.test(raw)) {
+      return { user: 'DNS lookup failed for this domain.', detail: raw };
+    }
+    if (/timeout|timed out|etimedout/i.test(raw)) {
+      return { user: 'Request timed out. Check connectivity or try again.', detail: raw };
+    }
+    if (/ssl|handshake|certificate|trust anchor|peer not authenticated/i.test(raw)) {
+      return { user: 'TLS handshake failed (certificate or protocol).', detail: raw };
+    }
+    if (/connection refused|econnrefused|network is unreachable/i.test(raw)) {
+      return { user: 'Connection refused or unreachable.', detail: raw };
+    }
+    if (/blocked|not allowed|cleartext/i.test(raw)) {
+      return { user: 'Cleartext HTTP blocked. Use https://', detail: raw };
+    }
+    return { user: 'Network error', detail: raw };
+  };
+  const probeConnectivity = async () => {
+    const endpoints = [
+      'https://connectivitycheck.gstatic.com/generate_204',
+      'https://www.google.com/generate_204',
+      'https://httpbin.org/status/204',
+    ];
+    for (const ep of endpoints) {
+      try {
+        const r = await CapacitorHttp.request({ url: ep, method: 'GET', headers: { 'user-agent': UA }, connectTimeout: 2500, readTimeout: 2500, responseType: 'text' });
+        if (r && r.status && r.status >= 200 && r.status < 400) return true;
+      } catch (_) {}
+    }
+    return false;
+  };
+
+  // Measure simple network latency using a 204 endpoint
+  const measureLatency = async () => {
+    const ep = 'https://connectivitycheck.gstatic.com/generate_204';
+    try {
+      const start = Date.now();
+      const r = await CapacitorHttp.request({ url: ep, method: 'GET', headers: { 'user-agent': UA }, connectTimeout: 4000, readTimeout: 4000, responseType: 'text' });
+      if (r && r.status && r.status >= 200 && r.status < 400) {
+        return Math.max(0, Date.now() - start);
+      }
+    } catch (_) {}
+    return null;
+  };
+
+  // Local diagnostics summary (Android-only fallback)
+  const buildLocalSummary = async () => {
+    try {
+      const online = await probeConnectivity();
+      const latency = online ? await measureLatency() : null;
+      const leaks = await checkWebRtcLeak();
+      // Derive a simple anonymity level based on local signals
+      // 1: low, 2: moderate, 3: high, 4: max
+      const anonymityLevel = leaks.length === 0 ? 2 : 1;
+      const recommendation = { type: 'device', anonymity_level: anonymityLevel, latency };
+      return {
+        recommendation,
+        tested: [],
+        tor_compare: { available: false },
+        webrtc_leaks: leaks,
+      };
+    } catch {
+      return {
+        recommendation: { type: 'device', anonymity_level: 1, latency: null },
+        tested: [],
+        tor_compare: { available: false },
+        webrtc_leaks: [],
+      };
+    }
+  };
+
   const persistHistory = (url) => {
     if (!url) return;
     const next = [url, ...auditHistory.filter((u) => u !== url)].slice(0, 5);
@@ -630,6 +775,89 @@ function App() {
     return recs;
   };
 
+  // Direct Android audit helper (bypasses backend)
+  const runDirectAudit = async (url) => {
+    try {
+      // Quick connectivity probe to avoid generic errors
+      const connected = await probeConnectivity();
+      if (!connected) {
+        setAuditError('No internet connectivity detected.');
+        setAuditErrorDetail('Probe failed. If behind captive portal/VPN, open a browser and complete login, then retry.');
+        return;
+      }
+      // Prefer HEAD; if blocked, fallback to GET
+      let resp;
+      try {
+        resp = await CapacitorHttp.request({
+          url,
+          method: 'HEAD',
+          headers: { 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'user-agent': UA },
+          connectTimeout: 10000,
+          readTimeout: 10000,
+          responseType: 'json',
+        });
+      } catch (_) {
+        resp = await CapacitorHttp.request({
+          url,
+          method: 'GET',
+          headers: { 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'user-agent': UA },
+          connectTimeout: 10000,
+          readTimeout: 10000,
+          responseType: 'text',
+        });
+      }
+
+      const hdrsObj = Object.fromEntries(Object.entries(resp?.headers || {}).map(([k, v]) => [String(k).toLowerCase(), v]));
+      const setCookie = hdrsObj['set-cookie'] || '';
+      const cookies = setCookie ? String(setCookie).split('\n').map((c) => c.trim()).filter(Boolean) : [];
+      let cookieSecure = true;
+      for (const c of cookies) {
+        if (!/\bSecure\b/i.test(c)) { cookieSecure = false; break; }
+      }
+      const headerSignals = {
+        hsts: 'strict-transport-security' in hdrsObj,
+        csp: 'content-security-policy' in hdrsObj,
+        referrer_policy: 'referrer-policy' in hdrsObj,
+        permissions_policy: 'permissions-policy' in hdrsObj,
+        x_frame_options: 'x-frame-options' in hdrsObj,
+        set_cookie_secure: cookieSecure,
+      };
+      const httpsOnly = /^https:/i.test(url);
+      const onionLoc = hdrsObj['onion-location'] || hdrsObj['onion-location'];
+      // Simple grade heuristic (aligns with backend)
+      let score = 0;
+      if (httpsOnly) score += 1;
+      if (headerSignals.hsts) score += 1;
+      if (headerSignals.csp) score += 1;
+      if (headerSignals.referrer_policy) score += 1;
+      if (headerSignals.permissions_policy) score += 1;
+      if (headerSignals.x_frame_options) score += 1;
+      if (headerSignals.set_cookie_secure) score += 1;
+      const grade = score >= 6 ? 'A' : (score >= 4 ? 'B' : 'C');
+
+      const leaks = await checkWebRtcLeak();
+      setAuditResult({
+        url,
+        result: {
+          https_only: httpsOnly,
+          redirects: 0,
+          headers: headerSignals,
+          onion_location: onionLoc || null,
+        },
+        grade,
+        tor_compare: { available: false },
+      });
+      setWebrtcLeaks(leaks);
+      persistHistory(url);
+      setAuditError(null);
+      setAuditErrorDetail('');
+    } catch (androidErr) {
+      const mapped = mapNetworkError(androidErr);
+      setAuditError(mapped.user);
+      setAuditErrorDetail(mapped.detail);
+    }
+  };
+
   // Privacy Audit runner
   const runPrivacyAudit = async (target = null) => {
     const raw = target ?? auditUrl;
@@ -640,6 +868,14 @@ function App() {
     setAuditResult(null);
     setWebrtcLeaks([]);
     try {
+      // Android: always use direct audit via CapacitorHttp — no backend required
+      const platformNow = (Capacitor?.getPlatform?.() || 'web');
+      if (platformNow === 'android' && CapacitorHttp) {
+        await runDirectAudit(url);
+        setAuditLoading(false);
+        return;
+      }
+
       const [res, leaks] = await Promise.all([
         http.get(`${apiBase}/privacy/audit`, { params: { url }, timeout: 15000 }),
         checkWebRtcLeak(),
@@ -658,7 +894,7 @@ function App() {
             resp = await CapacitorHttp.request({
               url,
               method: 'HEAD',
-              headers: { 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+              headers: { 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'user-agent': UA },
               connectTimeout: 10000,
               readTimeout: 10000,
               responseType: 'json',
@@ -667,7 +903,7 @@ function App() {
             resp = await CapacitorHttp.request({
               url,
               method: 'GET',
-              headers: { 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+              headers: { 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'user-agent': UA },
               connectTimeout: 10000,
               readTimeout: 10000,
               responseType: 'text',
@@ -717,13 +953,16 @@ function App() {
           setWebrtcLeaks(leaks);
           persistHistory(url);
           setAuditError(null);
+          setAuditErrorDetail('');
         } catch (androidErr) {
-          const msg2 = androidErr?.message || 'Audit failed';
-          setAuditError(msg2);
+          const mapped = mapNetworkError(androidErr);
+          setAuditError(mapped.user);
+          setAuditErrorDetail(mapped.detail);
         }
       } else {
-        const msg = e?.response?.data?.error || e?.message || 'Audit failed';
-        setAuditError(msg);
+        const mapped = mapNetworkError(e);
+        setAuditError(mapped.user);
+        setAuditErrorDetail(mapped.detail);
       }
     } finally {
       setAuditLoading(false);
@@ -1133,8 +1372,8 @@ function App() {
             </div>
             <div className="flex items-center gap-6">
               <div className="flex items-center gap-2">
-                <Activity className={`w-5 h-5 ${(connected && isOnline) ? 'text-emerald-400 animate-pulse' : 'text-gray-500'}`} />
-                <span className="text-sm">{!isOnline ? 'OFFLINE' : (connected ? 'ONLINE' : 'OFFLINE')}</span>
+                <Activity className={`w-5 h-5 ${isOnline ? 'text-emerald-400 animate-pulse' : 'text-gray-500'}`} />
+                <span className="text-sm">{isOnline ? 'ONLINE' : 'OFFLINE'}</span>
               </div>
               <div className="hidden md:flex items-center gap-2 px-3 py-1 rounded-full bg-white/10">
                 <span className="text-xs font-medium">API:</span>
@@ -1168,6 +1407,37 @@ function App() {
           </div>
         </header>
 
+        {/* Connectivity Banner */}
+        {backendError && isOnline && (
+          <div className="max-w-7xl mx-auto mt-4 px-4">
+            <div className="p-3 bg-amber-600/20 border border-amber-500/40 rounded-lg text-sm flex items-center justify-between">
+              <span>
+                Cannot reach backend at <span className="font-mono">{apiBase}</span>. Check server or URL.
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => { checkStatus(); loadSummary(); }}
+                  className="px-3 py-1 text-xs bg-amber-600 hover:bg-amber-700 rounded"
+                >Retry</button>
+                <button
+                  onClick={() => setShowSettings(true)}
+                  className="px-3 py-1 text-xs bg-white/10 hover:bg-white/20 rounded"
+                >Fix Backend URL</button>
+              </div>
+            </div>
+            {backendErrorDetail && (
+              <div className="text-xs text-amber-300 mt-1 opacity-80 break-all">{backendErrorDetail}</div>
+            )}
+          </div>
+        )}
+        {!isOnline && (
+          <div className="max-w-7xl mx-auto mt-4 px-4">
+            <div className="p-3 bg-red-600/20 border border-red-500/40 rounded-lg text-sm">
+              Device is offline. Check Wi‑Fi or Ethernet and try again.
+            </div>
+          </div>
+        )}
+
         {/* Main Content */}
         <main className="max-w-7xl mx-auto p-6">
           {/* DexAudit — Primary Audit Action */}
@@ -1192,6 +1462,9 @@ function App() {
             </div>
             {auditError && (
               <div className="mt-3 text-amber-300 text-sm">{auditError}</div>
+            )}
+            {auditError && auditErrorDetail && (
+              <div className="mt-1 text-amber-200 text-xs opacity-80 break-all">{auditErrorDetail}</div>
             )}
             {auditLoading && !auditError && (
               <div className="mt-3 text-sm text-gray-300">Testing headers and WebRTC…</div>
@@ -1345,6 +1618,9 @@ function App() {
           )}
           {auditError && (
             <div className="text-amber-300 text-sm mb-2">{auditError}</div>
+          )}
+          {auditError && auditErrorDetail && (
+            <div className="text-amber-200 text-xs opacity-80 mb-2 break-all">{auditErrorDetail}</div>
           )}
           {auditLoading && (
             <div className="text-sm text-gray-300">Testing headers and WebRTC…</div>
