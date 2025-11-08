@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import '@/App.css';
 import { http } from '@/lib/http';
-import { API_BASE } from '@/lib/apiBase';
-import { Capacitor } from '@capacitor/core';
+import { API_BASE, resolveBackendUrl } from '@/lib/apiBase';
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { Wifi, Zap, Globe, Lock, Activity, Satellite, Radio, Network, Info, ChevronLeft, ChevronRight, RotateCcw, Home as HomeIcon } from 'lucide-react';
 import { ensureRewardGate } from '@/lib/adGate';
 import { initAdMob, showBanner, hideBanner, showNativeAdvanced } from '@/lib/admob';
@@ -644,8 +644,83 @@ function App() {
       setWebrtcLeaks(leaks);
       persistHistory(url);
     } catch (e) {
-      const msg = e?.response?.data?.error || e?.message || 'Audit failed';
-      setAuditError(msg);
+      // Backend unreachable or route missing? Fallback on Android: audit directly via CapacitorHttp
+      const isAndroid = (Capacitor?.getPlatform?.() || 'web') === 'android';
+      if (isAndroid && CapacitorHttp) {
+        try {
+          // Prefer HEAD; some sites block HEAD, so fallback to GET
+          let resp;
+          try {
+            resp = await CapacitorHttp.request({
+              url,
+              method: 'HEAD',
+              headers: { 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+              connectTimeout: 10000,
+              readTimeout: 10000,
+              responseType: 'json',
+            });
+          } catch (headErr) {
+            resp = await CapacitorHttp.request({
+              url,
+              method: 'GET',
+              headers: { 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+              connectTimeout: 10000,
+              readTimeout: 10000,
+              responseType: 'text',
+            });
+          }
+
+          const hdrsObj = Object.fromEntries(Object.entries(resp?.headers || {}).map(([k, v]) => [String(k).toLowerCase(), v]));
+          const setCookie = hdrsObj['set-cookie'] || '';
+          const cookies = setCookie ? String(setCookie).split('\n').map((c) => c.trim()).filter(Boolean) : [];
+          let cookieSecure = true;
+          for (const c of cookies) {
+            if (!/\bSecure\b/i.test(c)) { cookieSecure = false; break; }
+          }
+          const headerSignals = {
+            hsts: 'strict-transport-security' in hdrsObj,
+            csp: 'content-security-policy' in hdrsObj,
+            referrer_policy: 'referrer-policy' in hdrsObj,
+            permissions_policy: 'permissions-policy' in hdrsObj,
+            x_frame_options: 'x-frame-options' in hdrsObj,
+            set_cookie_secure: cookieSecure,
+          };
+          const httpsOnly = /^https:/i.test(url);
+          const onionLoc = hdrsObj['onion-location'] || hdrsObj['onion-location'];
+          // Simple grade heuristic (aligns with backend)
+          let score = 0;
+          if (httpsOnly) score += 1;
+          if (headerSignals.hsts) score += 1;
+          if (headerSignals.csp) score += 1;
+          if (headerSignals.referrer_policy) score += 1;
+          if (headerSignals.permissions_policy) score += 1;
+          if (headerSignals.x_frame_options) score += 1;
+          if (headerSignals.set_cookie_secure) score += 1;
+          const grade = score >= 6 ? 'A' : (score >= 4 ? 'B' : 'C');
+
+          const leaks = await checkWebRtcLeak();
+          setAuditResult({
+            url,
+            result: {
+              https_only: httpsOnly,
+              redirects: 0,
+              headers: headerSignals,
+              onion_location: onionLoc || null,
+            },
+            grade,
+            tor_compare: { available: false },
+          });
+          setWebrtcLeaks(leaks);
+          persistHistory(url);
+          setAuditError(null);
+        } catch (androidErr) {
+          const msg2 = androidErr?.message || 'Audit failed';
+          setAuditError(msg2);
+        }
+      } else {
+        const msg = e?.response?.data?.error || e?.message || 'Audit failed';
+        setAuditError(msg);
+      }
     } finally {
       setAuditLoading(false);
     }
@@ -1026,56 +1101,36 @@ function App() {
 
         {/* Main Content */}
         <main className="max-w-7xl mx-auto p-6">
-          {/* Browser-First Section */}
+          {/* DexAudit — Primary Audit Action */}
           <div className="text-center py-16">
-            <h2 className="text-5xl font-bold mb-4 neon-text bttf-title bttf-gradient-text">
-              Dex Explorer
-            </h2>
-            <p className="text-xl text-gray-300 mb-4 neon-text bttf-label">
-              Choose Normal or Dark Side browser; we’ll auto-select the best route.
+            <h2 className="text-5xl font-bold mb-4">Dex Audit</h2>
+            <p className="text-lg text-gray-300 mb-6">
+              Run a privacy audit on any site. Checks headers, Onion-Location, and WebRTC leaks.
             </p>
-            <div className="flex items-center justify-center gap-3 mb-6" aria-label="Choose browsing mode">
+            <div className="flex items-center justify-center gap-2 max-w-2xl mx-auto">
+              <input
+                type="text"
+                value={auditUrl}
+                onChange={(e) => setAuditUrl(e.target.value)}
+                placeholder="Enter site URL (https://example.com)"
+                className="min-w-0 flex-1 px-4 py-3 bg-white/10 border border-white/20 rounded-lg focus:outline-none focus:border-gray-400"
+              />
               <button
-                aria-pressed={browseMode === 'light'}
-                className={`px-4 py-2 rounded-lg border ${browseMode === 'light' ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-white/10 text-gray-200 hover:bg-slate-700'}`}
-                onClick={() => handleModeSelect('light')}
-              >
-                Normal Browser
-              </button>
-              <button
-                aria-pressed={browseMode === 'dark'}
-                className={`px-4 py-2 rounded-lg border ${browseMode === 'dark' ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-white/10 text-gray-200 hover:bg-slate-700'}`}
-                onClick={() => handleModeSelect('dark')}
-              >
-                Dark Web
-              </button>
-              {/* Incognito is only available inside the Normal Browser overlay */}
+                onClick={() => runPrivacyAudit(auditUrl)}
+                disabled={auditLoading || !auditUrl}
+                className={`px-6 py-3 rounded-lg font-semibold ${auditLoading || !auditUrl ? 'bg-gray-600 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700'}`}
+              >{auditLoading ? 'Running…' : 'Audit'}</button>
             </div>
-            {/* Images removed per request to simplify initial screen */}
-
-            {/* Status Message */}
-            {status && status !== 'idle' && (
-              <div className="mt-8 text-lg" data-testid="status-message">
-                {status === 'discovering' && '🔍 Scanning for connections...'}
-                {status === 'discovered' && `✨ Found ${discoveredCount} sources!`}
-                {status === 'connecting' && '⚡ Establishing connection...'}
-                {status === 'connected' && '✅ Connection established.'}
-                {status === 'failed' && '❌ Connection failed. Trying again...'}
-                {status === 'loading' && '📡 Loading webpage...'}
-              </div>
+            {auditError && (
+              <div className="mt-3 text-amber-300 text-sm">{auditError}</div>
+            )}
+            {auditLoading && !auditError && (
+              <div className="mt-3 text-sm text-gray-300">Testing headers and WebRTC…</div>
             )}
 
-            {isWebPlatform && (
-              <div className="mt-6 flex justify-center">
-                <div className="w-[320px] h-[50px] bg-white/10 border border-white/20 rounded-lg flex items-center justify-center text-xs text-gray-300">
-                  Ad Placeholder (Banner)
-                </div>
-              </div>
-            )}
-
-            {/* Compact Diagnostics Card */}
+            {/* Optional diagnostics preview below the hero */}
             {Object.keys(summary.counts_by_type || {}).length > 0 && (
-              <div className="mt-6 max-w-3xl mx-auto p-4 bg-white/5 border border-white/10 rounded-xl text-left">
+              <div className="mt-8 max-w-3xl mx-auto p-4 bg-white/5 border border-white/10 rounded-xl text-left">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
                     <Activity className="w-4 h-4 text-blue-400" />
@@ -1095,9 +1150,7 @@ function App() {
                 </div>
                 {summary.recommendation && (
                   <div className="text-xs text-gray-300">
-                    <span className="font-medium">Recommended:</span> {summary.recommendation.type?.toUpperCase() || '—'}
-                    {' '}• Privacy {privacyLabel(summary.recommendation.anonymity_level)}
-                    {' '}• Latency {summary.recommendation.latency ? `${Math.round(summary.recommendation.latency)}ms` : 'Unknown'}
+                    <span className="font-medium">Recommended:</span> {summary.recommendation.type?.toUpperCase() || '—'} • Privacy {privacyLabel(summary.recommendation.anonymity_level)} • Latency {summary.recommendation.latency ? `${Math.round(summary.recommendation.latency)}ms` : 'Unknown'}
                   </div>
                 )}
               </div>
@@ -1106,104 +1159,7 @@ function App() {
 
           {/* Pre-Browser Mode Selection removed to simplify initial page to two buttons only */}
 
-          {/* Full-screen Browser Overlay with Mode Toggle */}
-          {browseMode !== null && (
-            <div ref={browserSectionRef} className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-sm" data-testid="browser-section">
-              <div className="max-w-7xl mx-auto p-4">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2">
-                    <Globe className="w-5 h-5 text-blue-400" />
-                    <span className="text-lg font-semibold">Secure Browser</span>
-                  </div>
-                  <button className="text-sm px-3 py-2 bg-white/10 border border-white/10 rounded hover:bg-white/20" onClick={() => { if (incognito) { setBrowserContent(''); setBrowserUrl(LIGHT_HOME); } setShowBrowser(false); setBrowseMode(null); }}>
-                    Exit
-                  </button>
-                </div>
-
-                {/* Simplified header only; no mode switching inside the browser */}
-                <div className="mb-2 flex items-center gap-3 text-sm text-gray-300">
-                  <span>Mode: {browseMode === 'dark' ? 'Dark Web' : 'Normal'}</span>
-                  {browseMode === 'light' && (
-                    <button
-                      aria-pressed={incognito}
-                      onClick={() => setIncognito((v) => !v)}
-                      className={`flex items-center gap-2 px-2 py-1 rounded-full border text-xs ${incognito ? 'bg-amber-500/20 border-amber-400 text-amber-300' : 'bg-white/10 border-white/20 text-gray-300 hover:bg-white/15'}`}
-                      title="Incognito mode toggles persistence; it does not change the route"
-                    >
-                      <Lock className="w-3 h-3" /> {incognito ? 'Incognito On' : 'Incognito Off'}
-                    </button>
-                  )}
-                </div>
-
-                {/* URL Bar */}
-                <div className="flex flex-wrap gap-2 mb-4">
-                  <input
-                    type="text"
-                    value={browserUrl}
-                    onChange={(e) => setBrowserUrl(e.target.value)}
-                    onKeyPress={(e) => e.key === 'Enter' && loadWebpage()}
-                    placeholder="Enter URL (e.g., https://example.com)"
-                    data-testid="url-input"
-                    className="min-w-0 flex-1 px-4 py-3 bg-white/10 border border-white/20 rounded-lg focus:outline-none focus:border-gray-400 transition-colors"
-                  />
-                  <button
-                    onClick={() => loadWebpage()}
-                    data-testid="load-button"
-                    disabled={!isOnline}
-                    className={`flex-shrink-0 w-full sm:w-auto px-6 py-3 rounded-lg font-semibold transition-colors ${(connected && isOnline) ? 'bg-blue-500 hover:bg-blue-600' : 'bg-slate-700 cursor-not-allowed'}`}
-                  >GO</button>
-                </div>
-
-                {/* Simple Overlay Toolbar */}
-                <div className="flex items-center gap-2 mb-3">
-                  <button onClick={handleBack} disabled={historyIndex <= 0} className={`px-2 py-2 rounded border ${historyIndex <= 0 ? 'bg-slate-800 border-white/10 text-gray-500' : 'bg-white/10 border-white/20 hover:bg-white/15'}`} title="Back">
-                    <ChevronLeft className="w-4 h-4" />
-                  </button>
-                  <button onClick={handleForward} disabled={historyIndex < 0 || historyIndex >= urlHistory.length - 1} className={`px-2 py-2 rounded border ${(historyIndex < 0 || historyIndex >= urlHistory.length - 1) ? 'bg-slate-800 border-white/10 text-gray-500' : 'bg-white/10 border-white/20 hover:bg-white/15'}`} title="Forward">
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-                  <button onClick={handleReload} className="px-2 py-2 rounded border bg-white/10 border-white/20 hover:bg-white/15" title="Reload">
-                    <RotateCcw className="w-4 h-4" />
-                  </button>
-                  <button onClick={handleHome} className="px-2 py-2 rounded border bg-white/10 border-white/20 hover:bg-white/15" title="Home">
-                    <HomeIcon className="w-4 h-4" />
-                  </button>
-                  <span className="ml-2 text-xs text-gray-300">{activeConnection ? `${activeConnection.type?.toUpperCase?.() || '—'} • ${speedLabel(activeConnection.latency)}` : 'No route'}</span>
-                </div>
-
-                {!connected && (
-                  <div className="mb-4 text-sm text-amber-300" data-testid="not-connected-hint">
-                    {!isOnline ? 'No network detected. Check Wi‑Fi or Ethernet.' : (status === 'connecting' ? 'Establishing connection…' : 'Connecting automatically based on your selection.')}
-                  </div>
-                )}
-
-                {browseMode === 'dark' && connected && activeConnection?.type !== 'tor' && (
-                  <div className="mb-4 text-sm text-amber-300">
-        Tor route not active. .onion links will not load. Choose a Tor source below. <a href={`${resolveBackendUrl()}/orbot-setup`} target="_blank" rel="noopener" className="underline">Orbot setup guide</a>
-                  </div>
-                )}
-
-                {/* Browser Content */}
-                <div className="bg-white rounded-lg p-0 text-black h-[70vh] overflow-hidden" data-testid="browser-content">
-                  {showBrowser ? (
-                    <BrowserFrame content={browserContent} url={browserUrl} />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center text-gray-700">
-                      Browser is ready. Enter a URL and press GO.
-                    </div>
-                  )}
-                </div>
-
-                {isWebPlatform && (
-                  <div className="fixed bottom-2 left-0 right-0 flex justify-center px-4">
-                    <div className="w-[320px] h-[50px] bg-white/10 border border-white/20 rounded-lg flex items-center justify-center text-xs text-gray-300">
-                      Ad Placeholder (Banner)
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
+          {/* Browser overlay removed: DexAudit is now the primary action */}
 
           {/* Active Connection Info */}
           {activeConnection && (
