@@ -1,14 +1,14 @@
 apply plugin: 'com.android.application'
 
 android {
-    namespace "com.fluxcapacitor.app"
+    namespace "com.dexaudit.app"
     compileSdk rootProject.ext.compileSdkVersion
     // Helper to read from env or project properties
     def envOrProp = { String name, String defaultValue = null ->
         return System.getenv(name) ?: (project.hasProperty(name) ? project.property(name) : defaultValue)
     }
     defaultConfig {
-        applicationId "com.fluxcapacitor.app"
+        applicationId "com.dexaudit.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1

@@ -8,5 +8,7 @@
 			"path": "../../../DexExplorer"
 		}
 	],
-	"settings": {}
+	"settings": {
+		"java.configuration.updateBuildConfiguration": "interactive"
+	}
 }

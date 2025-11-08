@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Flux Capacitor</string>
-    <string name="title_activity_main">Flux Capacitor</string>
-    <string name="package_name">com.fluxcapacitor.app</string>
-    <string name="custom_url_scheme">com.fluxcapacitor.app</string>
+    <string name="app_name">Dex Audit</string>
+    <string name="title_activity_main">Dex Audit</string>
+    <string name="package_name">com.dexaudit.app</string>
+    <string name="custom_url_scheme">com.dexaudit.app</string>
 </resources>
