@@ -1104,10 +1104,25 @@
   dependencies:
     "@capacitor/core" "^6.0.0"
 
+"@capacitor-community/http@^1.4.1":
+  version "1.4.1"
+  resolved "https://registry.npmmirror.com/@capacitor-community/http/-/http-1.4.1.tgz#005f51c2129f48bff75c46b8679a2fff57ced5a9"
+  integrity sha512-+pCkBXrwfm97UfjOgjV950H/qZ8SE36Mrcb46BlL1ps3VIsGuIO+AulL8GqTC6LewheRVtGJpRspNtneXQotNA==
+  dependencies:
+    "@capacitor/android" "^3.0.0"
+    "@capacitor/core" "^3.0.0"
+    "@capacitor/filesystem" "^1.0.0"
+    "@capacitor/ios" "^3.0.0"
+
 "@capacitor/android@6":
   version "6.2.1"
   resolved "https://registry.npmmirror.com/@capacitor/android/-/android-6.2.1.tgz#705347b62605b692093a96c81ce335875ea954e2"
   integrity sha512-8gd4CIiQO5LAIlPIfd5mCuodBRxMMdZZEdj8qG8m+dQ1sQ2xyemVpzHmRK8qSCHorsBUCg3D62j2cp6bEBAkdw==
+
+"@capacitor/android@^3.0.0":
+  version "3.9.0"
+  resolved "https://registry.npmmirror.com/@capacitor/android/-/android-3.9.0.tgz#73032c49e0d6cdb4bdd1c01565e28f3913f25fee"
+  integrity sha512-YTPyrh1NozEuYXWGtfqN27TLXUrLbZX9fggyd4JQ1yMaUZTmLPm5dCuznONhQ49aPkJnUJB02JfpHy/qGwa2Lw==
 
 "@capacitor/cli@6":
   version "6.2.1"
@@ -1132,6 +1147,13 @@
     tslib "^2.4.0"
     xml2js "^0.5.0"
 
+"@capacitor/core@^3.0.0":
+  version "3.9.0"
+  resolved "https://registry.npmmirror.com/@capacitor/core/-/core-3.9.0.tgz#ab5eccbeb02e140382e983b794ead296f1db7e6d"
+  integrity sha512-j1lL0+/7stY8YhIq1Lm6xixvUqIn89vtyH5ZpJNNmcZ0kwz6K9eLkcG6fvq1UWMDgSVZg9JrRGSFhb4LLoYOsw==
+  dependencies:
+    tslib "^2.1.0"
+
 "@capacitor/core@^6.0.0":
   version "6.2.1"
   resolved "https://registry.npmmirror.com/@capacitor/core/-/core-6.2.1.tgz#7f1cbf438e55d3c32940eac26abd307c19f8bdee"
@@ -1139,19 +1161,15 @@
   dependencies:
     tslib "^2.1.0"
 
-"@capacitor/core@latest":
-  version "7.4.4"
-  resolved "https://registry.npmmirror.com/@capacitor/core/-/core-7.4.4.tgz#b752dd7a12141e40d1c8ce2e37a79571d9f83518"
-  integrity sha512-xzjxpr+d2zwTpCaN0k+C6wKSZzWFAb9OVEUtmO72ihjr/NEDoLvsGl4WLfjWPcCO2zOy0b2X52tfRWjECFUjtw==
-  dependencies:
-    tslib "^2.1.0"
+"@capacitor/filesystem@^1.0.0":
+  version "1.1.0"
+  resolved "https://registry.npmmirror.com/@capacitor/filesystem/-/filesystem-1.1.0.tgz#0bd6a8bc185b7fd9a1219c3080ab26c2b54ea8b6"
+  integrity sha512-8O3UuvL8HNUEJvZnmn8yUmvgB1evtXfcF0oxIo3YbSlylqywJwS3JTiuhKmsvSxCdpbTy8IaTsutVh3gZgWbKg==
 
-"@capacitor/http@^0.0.2":
-  version "0.0.2"
-  resolved "https://registry.npmmirror.com/@capacitor/http/-/http-0.0.2.tgz#a5a3f29d1682662c62736aa953823b9a178e7073"
-  integrity sha512-3UPqYOmVkAQjCWWowSDGPnBkXY7znbPE7lNs8nhwTmE2E5fXTvjHM8PV15zOyn+nenY7zEu9Air49fGjrX+Tjg==
-  dependencies:
-    "@capacitor/core" latest
+"@capacitor/ios@^3.0.0":
+  version "3.9.0"
+  resolved "https://registry.npmmirror.com/@capacitor/ios/-/ios-3.9.0.tgz#5e31b88701fe355cacf0c9790b319731d8b85b04"
+  integrity sha512-GezPCJIujRHnF4wbrKJx6Q/mgFz0f9rmh/steTTXQZI+nEl6mHk6NWh8235p7YbhonYi5WD0rFNirrjGg1EaGw==
 
 "@craco/craco@7.1.0":
   version "7.1.0"

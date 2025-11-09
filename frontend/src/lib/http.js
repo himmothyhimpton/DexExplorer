@@ -1,5 +1,6 @@
 import axios from 'axios';
-import { Capacitor, CapacitorHttp } from '@capacitor/core';
+import { Capacitor } from '@capacitor/core';
+import { Http as CapacitorHttp } from '@capacitor-community/http';
 
 function isAndroid() {
   try {
@@ -66,4 +67,3 @@ export const http = {
     return axios.post(url, data, config);
   },
 };
-

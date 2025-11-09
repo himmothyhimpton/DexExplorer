@@ -5,8 +5,8 @@
   "description": "Dex Audit — Privacy audit & leak test (React + Capacitor)",
   "dependencies": {
     "@capacitor-community/admob": "6",
+    "@capacitor-community/http": "^1.4.1",
     "@capacitor/core": "^6.0.0",
-    "@capacitor/http": "^0.0.2",
     "@hookform/resolvers": "^5.0.1",
     "@radix-ui/react-accordion": "^1.2.8",
     "@radix-ui/react-alert-dialog": "^1.1.11",
