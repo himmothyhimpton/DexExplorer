@@ -72,6 +72,7 @@ function App() {
   // Runtime API base and Settings overlay state
   const [apiBase, setApiBase] = useState(() => getApiBase());
   const [showSettings, setShowSettings] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   const [backendInput, setBackendInput] = useState(() => resolveBackendUrl());
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [urlHistory, setUrlHistory] = useState([]);
@@ -141,6 +142,16 @@ function App() {
       if (browserUrl && !incognito) localStorage.setItem('flux_browser_url', browserUrl);
     }
   }, [browserUrl, incognito]);
+
+  // Show intro on first run
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const seen = localStorage.getItem('dex_intro_seen');
+    if (!seen) {
+      const t = setTimeout(() => setShowAbout(true), 600);
+      return () => clearTimeout(t);
+    }
+  }, []);
 
   // When mode changes, just set the default homepage and reset incognito.
   // Do NOT auto-open the browser here; handleModeSelect manages connect + open.
@@ -621,12 +632,14 @@ function App() {
       }
       console.error('Failed to load webpage:', error);
       const isSyntax = /Unexpected token/.test(error?.message || '');
+      const mapped = mapNetworkError(error);
       const msg = error?.message?.includes('timeout')
         ? 'Request timed out. Try again or switch route.'
         : isSyntax
           ? "Unexpected token '<' usually means HTML was returned where JSON was expected. Confirm backend is running on the configured API base."
-          : `Failed to load: ${error.message}`;
-      setBrowserContent(`<div class="p-4 text-red-700">${msg}</div>`);
+          : mapped.user || `Failed to load: ${error.message}`;
+      const detail = mapped.detail ? `<div class="mt-1 text-xs opacity-80">${mapped.detail}</div>` : '';
+      setBrowserContent(`<div class="p-4 text-red-700">${msg}${detail}</div>`);
       setShowBrowser(true);
       setStatus('error');
     }
@@ -662,15 +675,20 @@ function App() {
     return { user: 'Network error', detail: raw };
   };
   const probeConnectivity = async () => {
+    // Browser-level quick check
+    if (typeof navigator !== 'undefined' && navigator.onLine) return true;
     const endpoints = [
       'https://connectivitycheck.gstatic.com/generate_204',
       'https://www.google.com/generate_204',
       'https://httpbin.org/status/204',
+      'https://1.1.1.1/cdn-cgi/trace',
+      'https://example.com'
     ];
     for (const ep of endpoints) {
       try {
-        const r = await CapacitorHttp.request({ url: ep, method: 'GET', headers: { 'user-agent': UA }, connectTimeout: 2500, readTimeout: 2500, responseType: 'text' });
-        if (r && r.status && r.status >= 200 && r.status < 400) return true;
+        const r = await http.get(ep, { timeout: 2500, headers: { 'user-agent': UA } });
+        const status = r?.status;
+        if (status && status >= 200 && status < 400) return true;
       } catch (_) {}
     }
     return false;
@@ -681,7 +699,7 @@ function App() {
     const ep = 'https://connectivitycheck.gstatic.com/generate_204';
     try {
       const start = Date.now();
-      const r = await CapacitorHttp.request({ url: ep, method: 'GET', headers: { 'user-agent': UA }, connectTimeout: 4000, readTimeout: 4000, responseType: 'text' });
+      const r = await http.get(ep, { timeout: 4000, headers: { 'user-agent': UA } });
       if (r && r.status && r.status >= 200 && r.status < 400) {
         return Math.max(0, Date.now() - start);
       }
@@ -782,9 +800,9 @@ function App() {
       // Quick connectivity probe to avoid generic errors
       const connected = await probeConnectivity();
       if (!connected) {
-        setAuditError('No internet connectivity detected.');
-        setAuditErrorDetail('Probe failed. If behind captive portal/VPN, open a browser and complete login, then retry.');
-        return;
+        setAuditError('Connectivity check failed — attempting direct request.');
+        setAuditErrorDetail('Network may block connectivity probes. If behind captive portal/VPN, open a browser and complete login, then retry.');
+        // Continue with audit attempt instead of exiting
       }
       // Prefer HEAD; if blocked, fallback to GET
       let resp;
@@ -1364,14 +1382,49 @@ function App() {
             </div>
           </div>
         )}
+        {/* About / Intro Overlay */}
+        {showAbout && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="w-full max-w-2xl bg-slate-900 border border-white/10 rounded-xl shadow-xl">
+              <div className="p-4 border-b border-white/10 flex items-center justify-between">
+                <h3 className="text-lg font-semibold">About Dex Audit</h3>
+                <button className="text-sm text-gray-300 hover:text-white" onClick={() => setShowAbout(false)}>Close</button>
+              </div>
+              <div className="p-5 space-y-4 text-sm text-gray-200">
+                <p>Dex Audit helps you quickly assess a website’s privacy and security signals. It checks headers and behaviors that impact anonymity and safety.</p>
+                <div>
+                  <div className="font-medium text-white mb-1">What it checks</div>
+                  <ul className="list-disc list-inside space-y-1 text-gray-300">
+                    <li>HSTS, CSP, Referrer-Policy, Permissions-Policy, X-Frame-Options</li>
+                    <li>Cookie security (Secure flag) and HTTPS-only access</li>
+                    <li>Optional onion-location header for Tor friendly sites</li>
+                    <li>Basic device signals like latency and WebRTC IP leak</li>
+                  </ul>
+                </div>
+                <div>
+                  <div className="font-medium text-white mb-1">How to use</div>
+                  <ul className="list-disc list-inside space-y-1 text-gray-300">
+                    <li>Select a mode: Normal or Dark Web.</li>
+                    <li>Connect to a route when recommended, then search or enter a site.</li>
+                    <li>Open the in-app browser to preview content; review the grade and tips.</li>
+                  </ul>
+                </div>
+                <div className="text-xs text-gray-400">Note: Some networks block connectivity probes. If you see connectivity warnings, try opening a regular browser to complete any captive portal login, then retry.</div>
+              </div>
+              <div className="p-4 border-t border-white/10 flex items-center justify-end">
+                <button className="px-3 py-2 text-xs bg-white/10 hover:bg-white/20 rounded" onClick={() => { try { if (typeof window !== 'undefined') localStorage.setItem('dex_intro_seen', '1'); } catch {} setShowAbout(false); }}>Got it</button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* Header */}
-        <header className="p-6 border-b border-white/10 backdrop-blur-sm">
-          <div className="max-w-7xl mx-auto flex items-center justify-between">
+        <header className="px-4 py-4 sm:p-6 border-b border-white/10 backdrop-blur-sm">
+          <div className="max-w-7xl mx-auto flex items-center justify-between flex-wrap gap-3">
             <div className="flex items-center gap-3">
               <Zap className={`w-8 h-8 ${getStatusColor()} transition-colors duration-300`} />
               <h1 className="text-2xl font-bold text-white">Dex Audit</h1>
             </div>
-            <div className="flex items-center gap-6">
+            <div className="flex items-center gap-3 md:gap-6 flex-wrap justify-end">
               <div className="flex items-center gap-2">
                 <Activity className={`w-5 h-5 ${isOnline ? 'text-emerald-400 animate-pulse' : 'text-gray-500'}`} />
                 <span className="text-sm">{isOnline ? 'ONLINE' : 'OFFLINE'}</span>
@@ -1385,24 +1438,32 @@ function App() {
                 <span className={`text-xs font-medium ${browseMode === 'dark' ? 'text-purple-300' : 'text-blue-300'}`}>{browseMode ? (browseMode === 'dark' ? 'Dark Web' : 'Normal') : '—'}</span>
               </div>
               {stats.active > 0 && (
-                <div className="flex items-center gap-2 px-3 py-1 bg-emerald-500/20 rounded-full">
+                <div className="hidden sm:flex items-center gap-2 px-3 py-1 bg-emerald-500/20 rounded-full">
                   <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
                   <span className="text-xs font-medium">{stats.active} Active</span>
                 </div>
               )}
               {activeConnection && (
-                <div className="flex items-center gap-2 px-3 py-1 bg-blue-500/20 rounded-full">
+                <div className="hidden sm:flex items-center gap-2 px-3 py-1 bg-blue-500/20 rounded-full">
                   <span className="text-xs font-medium">Latency: {activeConnection.latency ? `${Math.round(activeConnection.latency)}ms` : 'N/A'}</span>
                   <span className="text-xs font-medium">• Strength: {speedLabel(activeConnection.latency)}</span>
                 </div>
               )}
               <button
-                className="px-3 py-1 text-xs bg-white/10 hover:bg-white/20 rounded flex items-center gap-2"
+                className="px-3 py-1 text-xs bg-white/10 hover:bg-white/20 rounded flex items-center gap-2 shrink-0"
                 onClick={() => setShowSettings(true)}
                 aria-label="Settings"
               >
                 <Settings className="w-4 h-4" />
                 Settings
+              </button>
+              <button
+                className="hidden sm:flex px-3 py-1 text-xs bg-white/10 hover:bg-white/20 rounded items-center gap-2 shrink-0"
+                onClick={() => setShowAbout(true)}
+                aria-label="About"
+              >
+                <Info className="w-4 h-4" />
+                Intro
               </button>
             </div>
           </div>
